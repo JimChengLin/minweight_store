@@ -110,12 +110,29 @@ func TestScanRange(t *testing.T) {
 		"ba=ba",
 	})
 
+	assertItems(t, "ScanRange/unbound-upper", func(fn VisitFunc) error {
+		return store.ScanRange([]byte("b"), nil, fn)
+	}, []string{
+		"b=b",
+		"ba=ba",
+		"c=c",
+	})
+
 	assertItems(t, "ReverseScanRange", func(fn VisitFunc) error {
 		return store.ReverseScanRange([]byte("ba"), []byte("a"), fn)
 	}, []string{
 		"ba=ba",
 		"b=b",
 		"aa=aa",
+	})
+
+	assertItems(t, "ReverseScanRange/unbound-lower", func(fn VisitFunc) error {
+		return store.ReverseScanRange([]byte("ba"), nil, fn)
+	}, []string{
+		"ba=ba",
+		"b=b",
+		"aa=aa",
+		"a=a",
 	})
 
 	err := store.ScanRange([]byte("z"), []byte("a"), func(Item) bool {

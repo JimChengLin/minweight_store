@@ -29,6 +29,8 @@ err = store.ScanRange([]byte("a"), []byte("z"), func(item minweight.Item) bool {
 Range semantics:
 
 - `ScanRange(greaterOrEqual, lessThan)` visits `[greaterOrEqual, lessThan)`.
+- `ScanRange(greaterOrEqual, nil)` visits `[greaterOrEqual, +inf)`.
 - `ReverseScanRange(lessOrEqual, greaterThan)` visits `(greaterThan, lessOrEqual]`.
+- `ReverseScanRange(lessOrEqual, nil)` visits `(-inf, lessOrEqual]` in descending order.
 - `SeekGE` returns the first item whose key is `>= pivot`.
 - `SeekLE` returns the last item whose key is `<= pivot`.

@@ -111,7 +111,7 @@ func (s *Store) Scan(fn VisitFunc) error {
 }
 
 func (s *Store) ScanRange(greaterOrEqual, lessThan []byte, fn VisitFunc) error {
-	if bytes.Compare(greaterOrEqual, lessThan) > 0 {
+	if lessThan != nil && bytes.Compare(greaterOrEqual, lessThan) > 0 {
 		return ErrInvalidRange
 	}
 
@@ -119,14 +119,21 @@ func (s *Store) ScanRange(greaterOrEqual, lessThan []byte, fn VisitFunc) error {
 	defer s.mu.RUnlock()
 
 	var visitErr error
-	err := s.index.AscendRange(greaterOrEqual, lessThan, func(key []byte, pos minpatricia.Position) bool {
+	visit := func(key []byte, pos minpatricia.Position) bool {
 		item, err := s.item(key, pos)
 		if err != nil {
 			visitErr = err
 			return false
 		}
 		return fn(item)
-	})
+	}
+
+	var err error
+	if lessThan == nil {
+		err = s.index.AscendGreaterOrEqual(greaterOrEqual, visit)
+	} else {
+		err = s.index.AscendRange(greaterOrEqual, lessThan, visit)
+	}
 	if err != nil {
 		return err
 	}
@@ -153,7 +160,7 @@ func (s *Store) ReverseScan(fn VisitFunc) error {
 }
 
 func (s *Store) ReverseScanRange(lessOrEqual, greaterThan []byte, fn VisitFunc) error {
-	if bytes.Compare(greaterThan, lessOrEqual) > 0 {
+	if greaterThan != nil && bytes.Compare(greaterThan, lessOrEqual) > 0 {
 		return ErrInvalidRange
 	}
 
@@ -161,14 +168,21 @@ func (s *Store) ReverseScanRange(lessOrEqual, greaterThan []byte, fn VisitFunc) 
 	defer s.mu.RUnlock()
 
 	var visitErr error
-	err := s.index.DescendRange(lessOrEqual, greaterThan, func(key []byte, pos minpatricia.Position) bool {
+	visit := func(key []byte, pos minpatricia.Position) bool {
 		item, err := s.item(key, pos)
 		if err != nil {
 			visitErr = err
 			return false
 		}
 		return fn(item)
-	})
+	}
+
+	var err error
+	if greaterThan == nil {
+		err = s.index.DescendLessOrEqual(lessOrEqual, visit)
+	} else {
+		err = s.index.DescendRange(lessOrEqual, greaterThan, visit)
+	}
 	if err != nil {
 		return err
 	}
