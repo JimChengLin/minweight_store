@@ -12,11 +12,13 @@ var (
 	ErrWalFull      = errors.New("minweight_store: wal is full")
 	ErrCorruptWAL   = errors.New("minweight_store: corrupt wal")
 	ErrClosed       = errors.New("minweight_store: store is closed")
+	ErrFatal        = errors.New("minweight_store: store is fatal")
 )
 
 type Store struct {
 	mu      sync.RWMutex
 	backend *indexBackend
+	fatal   error
 }
 
 type Item struct {
@@ -36,7 +38,7 @@ func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.backend == nil {
+	if s.backend == nil || s.fatal != nil {
 		return 0
 	}
 	return s.backend.len()
@@ -50,7 +52,11 @@ func (s *Store) Put(key, value []byte) error {
 	if err != nil {
 		return err
 	}
-	return backend.put(key, value)
+	result, err := backend.put(key, value)
+	if err != nil && result == backendMutationAcceptedThenFailed {
+		return s.markFatal(err)
+	}
+	return err
 }
 
 func (s *Store) Get(key []byte) ([]byte, bool, error) {
@@ -72,7 +78,11 @@ func (s *Store) Delete(key []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return backend.delete(key)
+	deleted, result, err := backend.delete(key)
+	if err != nil && result == backendMutationAcceptedThenFailed {
+		return deleted, s.markFatal(err)
+	}
+	return deleted, err
 }
 
 func (s *Store) Scan(fn VisitFunc) error {
@@ -157,7 +167,15 @@ func (s *Store) openBackend() (*indexBackend, error) {
 	if s.backend == nil {
 		return nil, ErrClosed
 	}
+	if s.fatal != nil {
+		return nil, s.fatal
+	}
 	return s.backend, nil
+}
+
+func (s *Store) markFatal(err error) error {
+	s.fatal = errors.Join(ErrFatal, err)
+	return s.fatal
 }
 
 func cloneBytes(v []byte) []byte {

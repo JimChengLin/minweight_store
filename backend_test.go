@@ -83,7 +83,7 @@ func TestIndexBackendUsesExplicitStores(t *testing.T) {
 	backend := newIndexBackend()
 	for i := 0; i < minpatricia.MaxNodeReps+50; i++ {
 		key := fmt.Sprintf("key-%04d", i)
-		if err := backend.put([]byte(key), []byte("value-"+key)); err != nil {
+		if _, err := backend.put([]byte(key), []byte("value-"+key)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,14 +102,14 @@ func TestIndexBackendUsesExplicitStores(t *testing.T) {
 	if err != nil || !ok || string(value) != "value-key-0004" {
 		t.Fatalf("reopened key-0004 = (%q,%v,%v), want value-key-0004,true,nil", value, ok, err)
 	}
-	if err := backend.put([]byte("key-0004"), []byte("value-key-0004-replaced")); err != nil {
+	if _, err := backend.put([]byte("key-0004"), []byte("value-key-0004-replaced")); err != nil {
 		t.Fatal(err)
 	}
 	value, ok, err = backend.get([]byte("key-0004"))
 	if err != nil || !ok || string(value) != "value-key-0004-replaced" {
 		t.Fatalf("backend key-0004 = (%q,%v,%v), want replaced value,true,nil", value, ok, err)
 	}
-	if _, err := backend.delete([]byte("key-0003")); err != nil {
+	if _, _, err := backend.delete([]byte("key-0003")); err != nil {
 		t.Fatal(err)
 	}
 	_, ok, err = backend.get([]byte("key-0003"))

@@ -30,6 +30,14 @@ type indexNodeStore interface {
 	Close() error
 }
 
+type backendMutationResult uint8
+
+const (
+	backendMutationNotAccepted backendMutationResult = iota
+	backendMutationApplied
+	backendMutationAcceptedThenFailed
+)
+
 func newIndexBackend() *indexBackend {
 	records := newHeapRecordStore()
 	nodes := newHeapNodeStore()
@@ -71,27 +79,30 @@ func (b *indexBackend) close() error {
 	return firstErr
 }
 
-func (b *indexBackend) put(key, value []byte) error {
+func (b *indexBackend) put(key, value []byte) (backendMutationResult, error) {
+	if len(key) > minpatricia.MaxKeySize {
+		return backendMutationNotAccepted, minpatricia.ErrKeyTooLarge
+	}
 	pos, err := b.records.Append(key, value)
 	if err != nil {
-		return err
+		return backendMutationNotAccepted, err
 	}
 	recordKey, ok := b.records.Key(pos)
 	if !ok {
-		return ErrCorruptIndex
+		return backendMutationAcceptedThenFailed, ErrCorruptIndex
 	}
 
 	old, replaced, err := b.index.Put(recordKey, pos)
 	if err != nil {
 		_ = b.records.Free(pos)
-		return err
+		return backendMutationAcceptedThenFailed, err
 	}
 	if replaced {
 		if err := b.records.Free(old); err != nil {
-			return err
+			return backendMutationAcceptedThenFailed, err
 		}
 	}
-	return nil
+	return backendMutationApplied, nil
 }
 
 func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
@@ -106,18 +117,24 @@ func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
 	return cloneBytes(value), true, nil
 }
 
-func (b *indexBackend) delete(key []byte) (bool, error) {
+func (b *indexBackend) delete(key []byte) (bool, backendMutationResult, error) {
+	if len(key) > minpatricia.MaxKeySize {
+		return false, backendMutationNotAccepted, minpatricia.ErrKeyTooLarge
+	}
 	if _, err := b.records.Delete(key); err != nil {
-		return false, err
+		return false, backendMutationNotAccepted, err
 	}
 	pos, deleted, err := b.index.Delete(key)
 	if err != nil || !deleted {
-		return deleted, err
+		if err != nil {
+			return deleted, backendMutationAcceptedThenFailed, err
+		}
+		return false, backendMutationApplied, nil
 	}
 	if err := b.records.Free(pos); err != nil {
-		return true, err
+		return true, backendMutationAcceptedThenFailed, err
 	}
-	return true, nil
+	return true, backendMutationApplied, nil
 }
 
 func (b *indexBackend) scan(fn VisitFunc) error {

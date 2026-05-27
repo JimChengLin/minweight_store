@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/JimChengLin/minpatricia"
 )
 
 func TestPutGetDelete(t *testing.T) {
@@ -49,6 +51,69 @@ func TestPutGetDelete(t *testing.T) {
 	_, ok, err = store.Get([]byte("alpha"))
 	if err != nil || ok {
 		t.Fatalf("Get(alpha) after delete ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+func TestStoreFatalAfterRecordAcceptedIndexFailure(t *testing.T) {
+	keyTooLarge := make([]byte, minpatricia.MaxKeySize+1)
+	records := &badKeyRecordStore{
+		heapRecordStore: newHeapRecordStore(),
+		key:             keyTooLarge,
+	}
+	store := &Store{
+		backend: newIndexBackendWithNodes(records, newHeapNodeStore()),
+	}
+
+	err := store.Put([]byte("alpha"), []byte("one"))
+	assertFatalError(t, err)
+	if !errors.Is(err, minpatricia.ErrKeyTooLarge) {
+		t.Fatalf("Put err = %v, want %v", err, minpatricia.ErrKeyTooLarge)
+	}
+	if records.appends != 1 {
+		t.Fatalf("record appends = %d, want 1", records.appends)
+	}
+
+	if err := store.Put([]byte("bravo"), []byte("two")); !errors.Is(err, ErrFatal) {
+		t.Fatalf("Put after fatal err = %v, want %v", err, ErrFatal)
+	}
+	if _, _, err := store.Get([]byte("alpha")); !errors.Is(err, ErrFatal) {
+		t.Fatalf("Get after fatal err = %v, want %v", err, ErrFatal)
+	}
+	if _, err := store.Delete([]byte("alpha")); !errors.Is(err, ErrFatal) {
+		t.Fatalf("Delete after fatal err = %v, want %v", err, ErrFatal)
+	}
+	err = store.Scan(func(Item) bool {
+		t.Fatal("Scan callback should not run after fatal")
+		return true
+	})
+	if !errors.Is(err, ErrFatal) {
+		t.Fatalf("Scan after fatal err = %v, want %v", err, ErrFatal)
+	}
+	if store.Len() != 0 {
+		t.Fatalf("Len after fatal = %d, want 0", store.Len())
+	}
+}
+
+func TestStoreDoesNotFatalOnRecordAppendFailure(t *testing.T) {
+	records := &appendErrorRecordStore{
+		heapRecordStore: newHeapRecordStore(),
+		err:             ErrWalFull,
+	}
+	store := &Store{
+		backend: newIndexBackendWithNodes(records, newHeapNodeStore()),
+	}
+
+	err := store.Put([]byte("alpha"), []byte("one"))
+	if !errors.Is(err, ErrWalFull) {
+		t.Fatalf("Put err = %v, want %v", err, ErrWalFull)
+	}
+	if errors.Is(err, ErrFatal) {
+		t.Fatalf("Put err = %v, must not be fatal", err)
+	}
+
+	_, ok, err := store.Get([]byte("alpha"))
+	if err != nil || ok {
+		t.Fatalf("Get after append failure ok=%v err=%v, want false,nil", ok, err)
 	}
 }
 
@@ -179,4 +244,36 @@ func assertItems(t *testing.T, name string, scan func(VisitFunc) error, want []s
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("%s = %v, want %v", name, got, want)
 	}
+}
+
+func assertFatalError(t *testing.T, err error) {
+	t.Helper()
+
+	if !errors.Is(err, ErrFatal) {
+		t.Fatalf("err = %v, want %v", err, ErrFatal)
+	}
+}
+
+type badKeyRecordStore struct {
+	*heapRecordStore
+	key     []byte
+	appends int
+}
+
+func (s *badKeyRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+	s.appends++
+	return s.heapRecordStore.Append(key, value)
+}
+
+func (s *badKeyRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
+	return s.key, true
+}
+
+type appendErrorRecordStore struct {
+	*heapRecordStore
+	err error
+}
+
+func (s *appendErrorRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+	return 0, s.err
 }

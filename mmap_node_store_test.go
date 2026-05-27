@@ -276,14 +276,14 @@ func TestMmapNodeStorePersistsIndex(t *testing.T) {
 	backend := newIndexBackendWithNodes(records, nodes)
 	for i := 0; i < minpatricia.MaxNodeReps+50; i++ {
 		key := fmt.Sprintf("key-%04d", i)
-		if err := backend.put([]byte(key), []byte("value-"+key)); err != nil {
+		if _, err := backend.put([]byte(key), []byte("value-"+key)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := backend.delete([]byte("key-0003")); err != nil {
+	if _, _, err := backend.delete([]byte("key-0003")); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.put([]byte("key-0004"), []byte("value-key-0004-replaced")); err != nil {
+	if _, err := backend.put([]byte("key-0004"), []byte("value-key-0004-replaced")); err != nil {
 		t.Fatal(err)
 	}
 	if backend.nodes.LiveNodes() < 2 {
