@@ -9,12 +9,16 @@ import (
 type indexBackend struct {
 	index   *minpatricia.Index
 	records *recordStore
-	nodes   *heapNodeStore
+	nodes   minpatricia.NodeStore
 }
 
 func newIndexBackend() *indexBackend {
 	records := newRecordStore()
 	nodes := newHeapNodeStore()
+	return newIndexBackendWithNodes(records, nodes)
+}
+
+func newIndexBackendWithNodes(records *recordStore, nodes minpatricia.NodeStore) *indexBackend {
 	return &indexBackend{
 		index:   minpatricia.NewWithNodes(records, nodes),
 		records: records,
@@ -22,7 +26,7 @@ func newIndexBackend() *indexBackend {
 	}
 }
 
-func openIndexBackend(records *recordStore, nodes *heapNodeStore) (*indexBackend, error) {
+func openIndexBackend(records *recordStore, nodes minpatricia.NodeStore) (*indexBackend, error) {
 	index, err := minpatricia.OpenWithNodes(records, nodes)
 	if err != nil {
 		return nil, err
