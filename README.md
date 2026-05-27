@@ -39,7 +39,8 @@ Range semantics:
 
 ```go
 store, err := minweight_store.Open("db", minweight_store.Options{
-	WALSize: 64 << 20,
+	WALSize:         64 << 20,
+	WALReplayPolicy: minweight_store.WALReplayStrict,
 })
 if err != nil {
 	return err
@@ -52,4 +53,12 @@ WAL record offsets, and startup currently resets the mmap index then replays the
 WAL to rebuild it. The WAL has a file header; each record stores op, key length,
 value length, CRC32, key, and value. There is no per-record magic.
 
-V1 does not implement flush, clean manifest, checkpoint, or WAL truncation yet.
+Replay policies:
+
+- `WALReplayStrict`: any corrupt WAL record fails `Open`.
+- `WALReplayPointInTime`: replay the valid prefix and truncate WAL logical used
+  to the first corrupt record.
+- `WALReplayBestEffort`: ignore corrupt record bytes and scan forward for later
+  CRC-valid records; WAL logical used is left unchanged.
+
+V1 does not implement flush, clean manifest, or checkpoint yet.

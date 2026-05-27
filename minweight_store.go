@@ -13,6 +13,7 @@ var (
 	ErrCorruptWAL   = errors.New("minweight_store: corrupt wal")
 	ErrClosed       = errors.New("minweight_store: store is closed")
 	ErrFatal        = errors.New("minweight_store: store is fatal")
+	ErrReplayPolicy = errors.New("minweight_store: invalid wal replay policy")
 )
 
 type Store struct {

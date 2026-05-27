@@ -10,7 +10,8 @@ import (
 )
 
 type Options struct {
-	WALSize int64
+	WALSize         int64
+	WALReplayPolicy WALReplayPolicy
 }
 
 func Open(dir string, options ...Options) (*Store, error) {
@@ -50,7 +51,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 	}()
 
 	backend := newIndexBackendWithNodes(wal, nodes)
-	if err := replayWALIntoIndex(wal, backend.index); err != nil {
+	if err := replayWALIntoIndex(wal, cfg.WALReplayPolicy, backend.index); err != nil {
 		return nil, err
 	}
 
@@ -60,8 +61,8 @@ func Open(dir string, options ...Options) (*Store, error) {
 	}, nil
 }
 
-func replayWALIntoIndex(wal *walRecordStore, index *minpatricia.Index) error {
-	return wal.Replay(func(op byte, key []byte, pos minpatricia.Position) error {
+func replayWALIntoIndex(wal *walRecordStore, policy WALReplayPolicy, index *minpatricia.Index) error {
+	return wal.Replay(policy, func(op byte, key []byte, pos minpatricia.Position) error {
 		switch op {
 		case walOpPut:
 			_, _, err := index.Put(key, pos)

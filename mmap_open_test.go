@@ -98,11 +98,68 @@ func TestWALRecordCRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	wal.data[uint64(pos)+walRecordHeaderSize] ^= 0xff
-	err = wal.Replay(func(op byte, key []byte, pos minpatricia.Position) error {
+	err = wal.Replay(WALReplayStrict, func(op byte, key []byte, pos minpatricia.Position) error {
 		return nil
 	})
 	if !errors.Is(err, ErrCorruptWAL) {
 		t.Fatalf("Replay err = %v, want %v", err, ErrCorruptWAL)
+	}
+}
+
+func TestOpenStrictRejectsCorruptWAL(t *testing.T) {
+	dir, walSize, _, _ := corruptMiddleWAL(t)
+	_, err := Open(dir, Options{WALSize: walSize})
+	if !errors.Is(err, ErrCorruptWAL) {
+		t.Fatalf("Open err = %v, want %v", err, ErrCorruptWAL)
+	}
+}
+
+func TestOpenPointInTimeTruncatesCorruptWAL(t *testing.T) {
+	dir, walSize, corruptPos, _ := corruptMiddleWAL(t)
+	store, err := Open(dir, Options{
+		WALSize:         walSize,
+		WALReplayPolicy: WALReplayPointInTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	assertGet(t, store, "alpha", "one")
+	assertMissing(t, store, "bravo")
+	assertMissing(t, store, "charlie")
+
+	wal := store.backend.records.(*walRecordStore)
+	if wal.used != uint64(corruptPos) {
+		t.Fatalf("wal used = %d, want %d", wal.used, corruptPos)
+	}
+}
+
+func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
+	dir, walSize, _, used := corruptMiddleWAL(t)
+	store, err := Open(dir, Options{
+		WALSize:         walSize,
+		WALReplayPolicy: WALReplayBestEffort,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	assertGet(t, store, "alpha", "one")
+	assertMissing(t, store, "bravo")
+	assertGet(t, store, "charlie", "three")
+
+	wal := store.backend.records.(*walRecordStore)
+	if wal.used != used {
+		t.Fatalf("wal used = %d, want unchanged %d", wal.used, used)
+	}
+}
+
+func TestOpenRejectsInvalidWALReplayPolicy(t *testing.T) {
+	_, err := Open(t.TempDir(), Options{WALReplayPolicy: WALReplayPolicy(99)})
+	if !errors.Is(err, ErrReplayPolicy) {
+		t.Fatalf("Open err = %v, want %v", err, ErrReplayPolicy)
 	}
 }
 
@@ -135,5 +192,50 @@ func TestInvalidKeyDoesNotAdvanceWAL(t *testing.T) {
 	}
 	if wal.used != used {
 		t.Fatalf("wal used = %d, want %d", wal.used, used)
+	}
+}
+
+func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64) {
+	t.Helper()
+
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), walSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal.Append([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	corruptPos, err := wal.Append([]byte("bravo"), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal.Append([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	wal.data[uint64(corruptPos)+walRecordHeaderSize] ^= 0xff
+	used := wal.used
+	if err := wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir, walSize, corruptPos, used
+}
+
+func assertGet(t *testing.T, store *Store, key, want string) {
+	t.Helper()
+
+	value, ok, err := store.Get([]byte(key))
+	if err != nil || !ok || string(value) != want {
+		t.Fatalf("Get(%s) = (%q,%v,%v), want %s,true,nil", key, value, ok, err, want)
+	}
+}
+
+func assertMissing(t *testing.T, store *Store, key string) {
+	t.Helper()
+
+	_, ok, err := store.Get([]byte(key))
+	if err != nil || ok {
+		t.Fatalf("Get(%s) ok=%v err=%v, want false,nil", key, ok, err)
 	}
 }

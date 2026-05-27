@@ -34,6 +34,18 @@ const (
 
 var walHeaderMagic = [8]byte{'M', 'W', 'W', 'A', 'L', '0', '1', 0}
 
+// WALReplayPolicy controls how Open handles corrupt WAL records during replay.
+type WALReplayPolicy uint8
+
+const (
+	// WALReplayStrict fails Open on the first corrupt WAL record.
+	WALReplayStrict WALReplayPolicy = iota
+	// WALReplayPointInTime replays the valid prefix and truncates the WAL there.
+	WALReplayPointInTime
+	// WALReplayBestEffort skips corrupt bytes and scans for later CRC-valid records.
+	WALReplayBestEffort
+)
+
 type walRecordStore struct {
 	file *os.File
 	data []byte
@@ -123,7 +135,20 @@ func (s *walRecordStore) Len() int {
 	return 0
 }
 
-func (s *walRecordStore) Replay(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+func (s *walRecordStore) Replay(policy WALReplayPolicy, fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+	switch policy {
+	case WALReplayStrict:
+		return s.replayStrict(fn)
+	case WALReplayPointInTime:
+		return s.replayPointInTime(fn)
+	case WALReplayBestEffort:
+		return s.replayBestEffort(fn)
+	default:
+		return ErrReplayPolicy
+	}
+}
+
+func (s *walRecordStore) replayStrict(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
 	offset := uint64(walHeaderSize)
 	for offset < s.used {
 		rec, err := s.recordAt(minpatricia.Position(offset), true)
@@ -138,6 +163,61 @@ func (s *walRecordStore) Replay(fn func(op byte, key []byte, pos minpatricia.Pos
 	if offset != s.used {
 		return ErrCorruptWAL
 	}
+	return nil
+}
+
+func (s *walRecordStore) replayPointInTime(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+	offset := uint64(walHeaderSize)
+	lastGoodOffset := offset
+	for offset < s.used {
+		rec, err := s.recordAt(minpatricia.Position(offset), true)
+		if err != nil {
+			return s.truncate(lastGoodOffset)
+		}
+		if err := fn(rec.op, rec.key, minpatricia.Position(offset)); err != nil {
+			return err
+		}
+		offset = rec.end
+		lastGoodOffset = offset
+	}
+	return nil
+}
+
+func (s *walRecordStore) replayBestEffort(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+	offset := uint64(walHeaderSize)
+	for offset < s.used {
+		rec, err := s.recordAt(minpatricia.Position(offset), true)
+		if err != nil {
+			next, ok := s.nextValidRecord(offset + 1)
+			if !ok {
+				return nil
+			}
+			offset = next
+			continue
+		}
+		if err := fn(rec.op, rec.key, minpatricia.Position(offset)); err != nil {
+			return err
+		}
+		offset = rec.end
+	}
+	return nil
+}
+
+func (s *walRecordStore) nextValidRecord(start uint64) (uint64, bool) {
+	for offset := start; offset+walRecordHeaderSize <= s.used; offset++ {
+		if _, err := s.recordAt(minpatricia.Position(offset), true); err == nil {
+			return offset, true
+		}
+	}
+	return 0, false
+}
+
+func (s *walRecordStore) truncate(used uint64) error {
+	if used < walHeaderSize || used > s.size {
+		return ErrCorruptWAL
+	}
+	s.used = used
+	s.writeUsed()
 	return nil
 }
 
