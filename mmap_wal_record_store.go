@@ -44,14 +44,14 @@ const (
 	WALReplayBestEffort
 )
 
-type walRecordStore struct {
+type mmapWALRecordStore struct {
 	file *os.File
 	data []byte
 	size uint64
 	used uint64
 }
 
-func openWALRecordStore(path string, size int64) (*walRecordStore, error) {
+func openMmapWALRecordStore(path string, size int64) (*mmapWALRecordStore, error) {
 	if size < walHeaderSize+walRecordHeaderSize {
 		return nil, ErrWalFull
 	}
@@ -86,7 +86,7 @@ func openWALRecordStore(path string, size int64) (*walRecordStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &walRecordStore{
+	store := &mmapWALRecordStore{
 		file: file,
 		data: data,
 		size: uint64(size),
@@ -101,19 +101,19 @@ func openWALRecordStore(path string, size int64) (*walRecordStore, error) {
 	return store, nil
 }
 
-func (s *walRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+func (s *mmapWALRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
 	return s.appendRecord(walOpPut, key, value)
 }
 
-func (s *walRecordStore) Delete(key []byte) (minpatricia.Position, error) {
+func (s *mmapWALRecordStore) Delete(key []byte) (minpatricia.Position, error) {
 	return s.appendRecord(walOpDelete, key, nil)
 }
 
-func (s *walRecordStore) Free(pos minpatricia.Position) error {
+func (s *mmapWALRecordStore) Free(pos minpatricia.Position) error {
 	return nil
 }
 
-func (s *walRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
+func (s *mmapWALRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
 	rec, err := s.recordAt(pos, false)
 	if err != nil {
 		return nil, false
@@ -121,7 +121,7 @@ func (s *walRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
 	return rec.key, true
 }
 
-func (s *walRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
+func (s *mmapWALRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	rec, err := s.recordAt(pos, false)
 	if err != nil || rec.op != walOpPut {
 		return nil, false
@@ -129,11 +129,11 @@ func (s *walRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	return rec.value, true
 }
 
-func (s *walRecordStore) Len() int {
+func (s *mmapWALRecordStore) Len() int {
 	return 0
 }
 
-func (s *walRecordStore) Replay(policy WALReplayPolicy, fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+func (s *mmapWALRecordStore) Replay(policy WALReplayPolicy, fn func(op byte, key []byte, pos minpatricia.Position) error) error {
 	switch policy {
 	case WALReplayStrict:
 		return s.replayStrict(fn)
@@ -146,7 +146,7 @@ func (s *walRecordStore) Replay(policy WALReplayPolicy, fn func(op byte, key []b
 	}
 }
 
-func (s *walRecordStore) replayStrict(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+func (s *mmapWALRecordStore) replayStrict(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
 	offset := uint64(walHeaderSize)
 	for offset < s.used {
 		rec, err := s.recordAt(minpatricia.Position(offset), true)
@@ -164,7 +164,7 @@ func (s *walRecordStore) replayStrict(fn func(op byte, key []byte, pos minpatric
 	return nil
 }
 
-func (s *walRecordStore) replayPointInTime(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+func (s *mmapWALRecordStore) replayPointInTime(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
 	offset := uint64(walHeaderSize)
 	lastGoodOffset := offset
 	for offset < s.used {
@@ -181,7 +181,7 @@ func (s *walRecordStore) replayPointInTime(fn func(op byte, key []byte, pos minp
 	return nil
 }
 
-func (s *walRecordStore) replayBestEffort(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
+func (s *mmapWALRecordStore) replayBestEffort(fn func(op byte, key []byte, pos minpatricia.Position) error) error {
 	offset := uint64(walHeaderSize)
 	for offset < s.used {
 		rec, err := s.recordAt(minpatricia.Position(offset), true)
@@ -201,7 +201,7 @@ func (s *walRecordStore) replayBestEffort(fn func(op byte, key []byte, pos minpa
 	return nil
 }
 
-func (s *walRecordStore) nextValidRecord(start uint64) (uint64, bool) {
+func (s *mmapWALRecordStore) nextValidRecord(start uint64) (uint64, bool) {
 	for offset := start; offset+walRecordHeaderSize <= s.used; offset++ {
 		if _, err := s.recordAt(minpatricia.Position(offset), true); err == nil {
 			return offset, true
@@ -210,7 +210,7 @@ func (s *walRecordStore) nextValidRecord(start uint64) (uint64, bool) {
 	return 0, false
 }
 
-func (s *walRecordStore) truncate(used uint64) error {
+func (s *mmapWALRecordStore) truncate(used uint64) error {
 	if used < walHeaderSize || used > s.size {
 		return ErrCorruptWAL
 	}
@@ -219,14 +219,14 @@ func (s *walRecordStore) truncate(used uint64) error {
 	return nil
 }
 
-func (s *walRecordStore) Sync() error {
+func (s *mmapWALRecordStore) Sync() error {
 	if err := msyncMmap(s.data); err != nil {
 		return err
 	}
 	return s.file.Sync()
 }
 
-func (s *walRecordStore) Close() error {
+func (s *mmapWALRecordStore) Close() error {
 	var firstErr error
 	if s.data != nil {
 		if err := msyncMmap(s.data); err != nil && firstErr == nil {
@@ -249,7 +249,7 @@ func (s *walRecordStore) Close() error {
 	return firstErr
 }
 
-func (s *walRecordStore) appendRecord(op byte, key, value []byte) (minpatricia.Position, error) {
+func (s *mmapWALRecordStore) appendRecord(op byte, key, value []byte) (minpatricia.Position, error) {
 	if op != walOpPut && op != walOpDelete {
 		return 0, ErrCorruptWAL
 	}
@@ -283,7 +283,7 @@ func (s *walRecordStore) appendRecord(op byte, key, value []byte) (minpatricia.P
 	return minpatricia.Position(start), nil
 }
 
-func (s *walRecordStore) recordAt(pos minpatricia.Position, verifyCRC bool) (walRecord, error) {
+func (s *mmapWALRecordStore) recordAt(pos minpatricia.Position, verifyCRC bool) (walRecord, error) {
 	offset := uint64(pos)
 	if offset < walHeaderSize || offset+walRecordHeaderSize > s.used {
 		return walRecord{}, ErrCorruptWAL
@@ -323,14 +323,14 @@ func (s *walRecordStore) recordAt(pos minpatricia.Position, verifyCRC bool) (wal
 	}, nil
 }
 
-func (s *walRecordStore) initHeader() {
+func (s *mmapWALRecordStore) initHeader() {
 	copy(s.data[:8], walHeaderMagic[:])
 	binary.LittleEndian.PutUint32(s.data[walHeaderVersionOffset:walHeaderVersionOffset+4], walVersion)
 	s.used = walHeaderSize
 	s.writeUsed()
 }
 
-func (s *walRecordStore) loadHeader() error {
+func (s *mmapWALRecordStore) loadHeader() error {
 	if string(s.data[:8]) != string(walHeaderMagic[:]) {
 		return ErrCorruptWAL
 	}
@@ -345,7 +345,7 @@ func (s *walRecordStore) loadHeader() error {
 	return nil
 }
 
-func (s *walRecordStore) writeUsed() {
+func (s *mmapWALRecordStore) writeUsed() {
 	binary.LittleEndian.PutUint64(s.data[walHeaderUsedOffset:walHeaderUsedOffset+8], s.used)
 }
 

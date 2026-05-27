@@ -103,7 +103,7 @@ func TestOpenCleanManifestSkipsReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), 1<<20)
+	wal, err := openMmapWALRecordStore(filepath.Join(dir, "wal"), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestOpenRejectsCorruptManifest(t *testing.T) {
 }
 
 func TestWALRecordCRC(t *testing.T) {
-	wal, err := openWALRecordStore(filepath.Join(t.TempDir(), "wal"), 1<<20)
+	wal, err := openMmapWALRecordStore(filepath.Join(t.TempDir(), "wal"), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestOpenPointInTimeTruncatesCorruptWAL(t *testing.T) {
 	assertMissing(t, store, "bravo")
 	assertMissing(t, store, "charlie")
 
-	wal := store.backend.records.(*walRecordStore)
+	wal := store.wal
 	if wal.used != uint64(corruptPos) {
 		t.Fatalf("wal used = %d, want %d", wal.used, corruptPos)
 	}
@@ -248,7 +248,7 @@ func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
 	assertMissing(t, store, "bravo")
 	assertGet(t, store, "charlie", "three")
 
-	wal := store.backend.records.(*walRecordStore)
+	wal := store.wal
 	if wal.used != used {
 		t.Fatalf("wal used = %d, want unchanged %d", wal.used, used)
 	}
@@ -290,7 +290,7 @@ func TestInvalidKeyDoesNotAdvanceWAL(t *testing.T) {
 	}
 	defer store.Close()
 
-	wal := store.backend.records.(*walRecordStore)
+	wal := store.wal
 	used := wal.used
 	key := make([]byte, minpatricia.MaxKeySize+1)
 	err = store.Put(key, []byte("value"))
@@ -307,7 +307,7 @@ func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64
 
 	const walSize = int64(1 << 20)
 	dir := t.TempDir()
-	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), walSize)
+	wal, err := openMmapWALRecordStore(filepath.Join(dir, "wal"), walSize)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,13 +15,14 @@ var (
 	ErrFatal        = errors.New("minweight_store: store is fatal")
 	ErrReplayPolicy = errors.New("minweight_store: invalid wal replay policy")
 	ErrManifest     = errors.New("minweight_store: corrupt manifest")
+	ErrParquet      = errors.New("minweight_store: invalid parquet record store")
 )
 
 type Store struct {
 	mu       sync.RWMutex
 	backend  *indexBackend
 	manifest *manifest
-	wal      *walRecordStore
+	wal      *mmapWALRecordStore
 	fatal    error
 }
 

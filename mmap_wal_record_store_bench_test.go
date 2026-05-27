@@ -45,7 +45,7 @@ func BenchmarkRecordStoreRead(b *testing.B) {
 			_ = sink
 		})
 		b.Run(size.name+"/wal_mmap", func(b *testing.B) {
-			wal, fixture := buildWALRecordStoreBenchFixture(b, data)
+			wal, fixture := buildMmapWALRecordStoreBenchFixture(b, data)
 			defer wal.Close()
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -82,7 +82,7 @@ func BenchmarkRecordStorePutBatch(b *testing.B) {
 			})
 		})
 		b.Run(size.name+"/wal_mmap", func(b *testing.B) {
-			wal, err := openWALRecordStore(filepath.Join(b.TempDir(), "wal"), walBenchSize(data, 1))
+			wal, err := openMmapWALRecordStore(filepath.Join(b.TempDir(), "wal"), walBenchSize(data, 1))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -182,10 +182,10 @@ func buildHeapRecordStoreBenchFixture(data recordBackendBenchData) recordBackend
 	}
 }
 
-func buildWALRecordStoreBenchFixture(tb testing.TB, data recordBackendBenchData) (*walRecordStore, recordBackendBenchFixture) {
+func buildMmapWALRecordStoreBenchFixture(tb testing.TB, data recordBackendBenchData) (*mmapWALRecordStore, recordBackendBenchFixture) {
 	tb.Helper()
 
-	wal, err := openWALRecordStore(filepath.Join(tb.TempDir(), "wal"), walBenchSize(data, 1))
+	wal, err := openMmapWALRecordStore(filepath.Join(tb.TempDir(), "wal"), walBenchSize(data, 1))
 	if err != nil {
 		tb.Fatal(err)
 	}

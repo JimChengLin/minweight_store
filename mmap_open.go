@@ -41,7 +41,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 		}
 	}()
 
-	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), cfg.WALSize)
+	wal, err := openMmapWALRecordStore(filepath.Join(dir, "wal"), cfg.WALSize)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 	}, nil
 }
 
-func replayWALIntoIndex(wal *walRecordStore, policy WALReplayPolicy, index *minpatricia.Index) error {
+func replayWALIntoIndex(wal *mmapWALRecordStore, policy WALReplayPolicy, index *minpatricia.Index) error {
 	return wal.Replay(policy, func(op byte, key []byte, pos minpatricia.Position) error {
 		switch op {
 		case walOpPut:
