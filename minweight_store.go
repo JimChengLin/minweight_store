@@ -14,12 +14,15 @@ var (
 	ErrClosed       = errors.New("minweight_store: store is closed")
 	ErrFatal        = errors.New("minweight_store: store is fatal")
 	ErrReplayPolicy = errors.New("minweight_store: invalid wal replay policy")
+	ErrManifest     = errors.New("minweight_store: corrupt manifest")
 )
 
 type Store struct {
-	mu      sync.RWMutex
-	backend *indexBackend
-	fatal   error
+	mu       sync.RWMutex
+	backend  *indexBackend
+	manifest *manifest
+	wal      *walRecordStore
+	fatal    error
 }
 
 type Item struct {
@@ -160,8 +163,28 @@ func (s *Store) Close() error {
 		return nil
 	}
 	backend := s.backend
+	fatal := s.fatal
+	manifest := s.manifest
+	wal := s.wal
 	s.backend = nil
-	return backend.close()
+	s.manifest = nil
+	s.wal = nil
+
+	var firstErr error
+	if fatal == nil && manifest != nil && wal != nil {
+		if err := backend.sync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if firstErr == nil {
+			if err := manifest.write(wal.used); err != nil {
+				firstErr = err
+			}
+		}
+	}
+	if err := backend.close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 func (s *Store) openBackend() (*indexBackend, error) {

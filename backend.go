@@ -22,11 +22,13 @@ type indexRecordStore interface {
 	Free(pos minpatricia.Position) error
 	Value(pos minpatricia.Position) ([]byte, bool)
 	Len() int
+	Sync() error
 	Close() error
 }
 
 type indexNodeStore interface {
 	minpatricia.NodeStore
+	Sync() error
 	Close() error
 }
 
@@ -68,12 +70,31 @@ func (b *indexBackend) len() int {
 	return b.index.Len()
 }
 
+func (b *indexBackend) sync() error {
+	var firstErr error
+	if err := b.nodes.Sync(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := b.records.Sync(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
 func (b *indexBackend) close() error {
 	var firstErr error
 	if err := b.nodes.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	if err := b.records.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+func (b *indexBackend) syncAndClose() error {
+	firstErr := b.sync()
+	if err := b.close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr

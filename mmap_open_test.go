@@ -5,6 +5,7 @@ package minweight_store
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -86,6 +87,103 @@ func TestOpenResetsPersistedIndexBeforeReplay(t *testing.T) {
 	}
 }
 
+func TestOpenCleanManifestSkipsReplay(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, manifestName)); err != nil {
+		t.Fatal(err)
+	}
+
+	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal.data[walHeaderSize+walRecordCRCOffset] ^= 0xff
+	if err := wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertGet(t, store, "alpha", "one")
+	if _, err := os.Stat(filepath.Join(dir, manifestName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("manifest after Open err = %v, want not exist", err)
+	}
+}
+
+func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	backend := store.backend
+	store.backend = nil
+	if err := backend.syncAndClose(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+}
+
+func TestOpenRejectsCorruptManifest(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestPath := filepath.Join(dir, manifestName)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[manifestWALUsedOffset] ^= 0xff
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{WALSize: 1 << 20})
+	if !errors.Is(err, ErrManifest) {
+		t.Fatalf("Open err = %v, want %v", err, ErrManifest)
+	}
+}
+
 func TestWALRecordCRC(t *testing.T) {
 	wal, err := openWALRecordStore(filepath.Join(t.TempDir(), "wal"), 1<<20)
 	if err != nil {
@@ -157,7 +255,16 @@ func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
 }
 
 func TestOpenRejectsInvalidWALReplayPolicy(t *testing.T) {
-	_, err := Open(t.TempDir(), Options{WALReplayPolicy: WALReplayPolicy(99)})
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{WALSize: 1 << 20, WALReplayPolicy: WALReplayPolicy(99)})
 	if !errors.Is(err, ErrReplayPolicy) {
 		t.Fatalf("Open err = %v, want %v", err, ErrReplayPolicy)
 	}

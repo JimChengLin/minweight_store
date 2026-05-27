@@ -62,6 +62,10 @@ func (s *heapNodeStore) LiveNodes() int {
 	return s.live
 }
 
+func (s *heapNodeStore) Sync() error {
+	return nil
+}
+
 func (s *heapNodeStore) Close() error {
 	return nil
 }

@@ -15,12 +15,10 @@ import (
 const (
 	defaultWALSize int64 = 64 * 1024 * 1024
 
-	walHeaderSize        = 4096
-	walVersion    uint32 = 1
+	walVersion uint32 = 1
 
 	walHeaderVersionOffset = 8
-	walHeaderSizeOffset    = 16
-	walHeaderUsedOffset    = 24
+	walHeaderUsedOffset    = 16
 
 	walRecordHeaderSize  = 13
 	walRecordOpOffset    = 0
@@ -328,7 +326,6 @@ func (s *walRecordStore) recordAt(pos minpatricia.Position, verifyCRC bool) (wal
 func (s *walRecordStore) initHeader() {
 	copy(s.data[:8], walHeaderMagic[:])
 	binary.LittleEndian.PutUint32(s.data[walHeaderVersionOffset:walHeaderVersionOffset+4], walVersion)
-	binary.LittleEndian.PutUint64(s.data[walHeaderSizeOffset:walHeaderSizeOffset+8], s.size)
 	s.used = walHeaderSize
 	s.writeUsed()
 }
@@ -338,9 +335,6 @@ func (s *walRecordStore) loadHeader() error {
 		return ErrCorruptWAL
 	}
 	if version := binary.LittleEndian.Uint32(s.data[walHeaderVersionOffset : walHeaderVersionOffset+4]); version != walVersion {
-		return ErrCorruptWAL
-	}
-	if size := binary.LittleEndian.Uint64(s.data[walHeaderSizeOffset : walHeaderSizeOffset+8]); size != s.size {
 		return ErrCorruptWAL
 	}
 	used := binary.LittleEndian.Uint64(s.data[walHeaderUsedOffset : walHeaderUsedOffset+8])

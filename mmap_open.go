@@ -22,9 +22,13 @@ func Open(dir string, options ...Options) (*Store, error) {
 			cfg.WALSize = defaultWALSize
 		}
 	}
+	if cfg.WALReplayPolicy > WALReplayBestEffort {
+		return nil, ErrReplayPolicy
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
+	manifest := &manifest{path: filepath.Join(dir, manifestName)}
 
 	nodes, err := openMmapNodeStore(filepath.Join(dir, "index"))
 	if err != nil {
@@ -36,9 +40,6 @@ func Open(dir string, options ...Options) (*Store, error) {
 			_ = nodes.Close()
 		}
 	}()
-	if err := nodes.Reset(); err != nil {
-		return nil, err
-	}
 
 	wal, err := openWALRecordStore(filepath.Join(dir, "wal"), cfg.WALSize)
 	if err != nil {
@@ -50,14 +51,35 @@ func Open(dir string, options ...Options) (*Store, error) {
 		}
 	}()
 
-	backend := newIndexBackendWithNodes(wal, nodes)
-	if err := replayWALIntoIndex(wal, cfg.WALReplayPolicy, backend.index); err != nil {
+	manifestWALUsedBytes, clean, err := manifest.read()
+	if err != nil {
+		return nil, err
+	}
+
+	var backend *indexBackend
+	if clean && manifestWALUsedBytes == wal.used {
+		backend, err = openIndexBackend(wal, nodes)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if err := nodes.Reset(); err != nil {
+			return nil, err
+		}
+		backend = newIndexBackendWithNodes(wal, nodes)
+		if err := replayWALIntoIndex(wal, cfg.WALReplayPolicy, backend.index); err != nil {
+			return nil, err
+		}
+	}
+	if err := manifest.remove(); err != nil {
 		return nil, err
 	}
 
 	ok = true
 	return &Store{
-		backend: backend,
+		backend:  backend,
+		manifest: manifest,
+		wal:      wal,
 	}, nil
 }
 

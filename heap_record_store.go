@@ -80,6 +80,10 @@ func (s *heapRecordStore) Len() int {
 	return s.live
 }
 
+func (s *heapRecordStore) Sync() error {
+	return nil
+}
+
 func (s *heapRecordStore) Close() error {
 	return nil
 }
