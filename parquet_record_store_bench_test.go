@@ -24,6 +24,14 @@ type parquetRecordStoreBenchData struct {
 	values [][]byte
 }
 
+type parquetRecordKey struct {
+	Key []byte `parquet:"key"`
+}
+
+type parquetRecordValue struct {
+	Value []byte `parquet:"value"`
+}
+
 var parquetRecordStoreBenchSizes = []parquetRecordStoreBenchSize{
 	{name: "1K", n: 1_000},
 	{name: "10K", n: 10_000},

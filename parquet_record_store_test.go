@@ -2,6 +2,7 @@ package minweight_store
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,6 +91,19 @@ func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
 	assertParquetRecord(t, store, second, "bravo", "two")
 }
 
+func TestParquetRecordStoreAppendAfterSyncFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
+		{Key: []byte("alpha"), Value: []byte("one")},
+	})
+	defer store.Close()
+
+	pos, err := store.Append([]byte("bravo"), []byte("two"))
+	if pos != 0 || !errors.Is(err, ErrParquet) {
+		t.Fatalf("Append after Sync = (%d,%v), want 0,%v", pos, err, ErrParquet)
+	}
+}
+
 func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{
@@ -111,15 +125,49 @@ func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	assertParquetRecord(t, store, positions[2], "charlie", "three")
 }
 
-func TestParquetRecordStoreReadsProjectedColumns(t *testing.T) {
+func TestParquetRecordStoreUsesByteArrayColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 	})
 	defer store.Close()
 
-	assertParquetProjectionColumns[parquetRecordKey](t, store.rowGroups[0], "key")
-	assertParquetProjectionColumns[parquetRecordValue](t, store.rowGroups[0], "value")
+	chunks := store.rowGroups[0].ColumnChunks()
+	if len(chunks) != parquetRecordColumnCount {
+		t.Fatalf("column chunks = %d, want %d", len(chunks), parquetRecordColumnCount)
+	}
+	if chunks[parquetRecordKeyColumn].Type().Kind() != parquet.ByteArray {
+		t.Fatalf("key column type = %s, want %s", chunks[parquetRecordKeyColumn].Type(), parquet.ByteArray)
+	}
+	if chunks[parquetRecordValueColumn].Type().Kind() != parquet.ByteArray {
+		t.Fatalf("value column type = %s, want %s", chunks[parquetRecordValueColumn].Type(), parquet.ByteArray)
+	}
+}
+
+func TestParquetRecordStoreDefaultPageSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	records := make([]parquetRecord, 512)
+	for i := range records {
+		value := make([]byte, 128)
+		for j := range value {
+			value[j] = byte(i + j)
+		}
+		records[i] = parquetRecord{
+			Key:   []byte{byte(i >> 8), byte(i)},
+			Value: value,
+		}
+	}
+
+	store, _ := buildParquetRecordStoreForTest(t, path, records)
+	defer store.Close()
+
+	offsetIndex, err := store.rowGroups[0].ColumnChunks()[parquetRecordValueColumn].OffsetIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offsetIndex.NumPages() <= 1 {
+		t.Fatalf("value pages = %d, want more than 1", offsetIndex.NumPages())
+	}
 }
 
 func TestParquetRecordStoreInvalidPosition(t *testing.T) {
@@ -189,18 +237,6 @@ func assertParquetRecord(t *testing.T, store *parquetRecordStore, pos minpatrici
 	gotValue, ok := store.Value(pos)
 	if !ok || string(gotValue) != value {
 		t.Fatalf("Value(%d) = (%q,%v), want %q,true", pos, gotValue, ok, value)
-	}
-}
-
-func assertParquetProjectionColumns[T any](t *testing.T, rowGroup parquet.RowGroup, column string) {
-	t.Helper()
-
-	reader := parquet.NewGenericRowGroupReader[T](rowGroup)
-	defer reader.Close()
-
-	columns := reader.Schema().Columns()
-	if len(columns) != 1 || len(columns[0]) != 1 || columns[0][0] != column {
-		t.Fatalf("projection columns = %v, want [[%s]]", columns, column)
 	}
 }
 

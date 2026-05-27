@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/JimChengLin/minpatricia"
 	"github.com/parquet-go/parquet-go"
@@ -17,6 +18,10 @@ const (
 	parquetRecordMaxRowsPerRowGroup = parquetRecordMaxRowIndex + 1
 	parquetRecordMaxEncodedRowGroup = minpatriciaHandleTag>>parquetRecordRowIndexBits - 1
 	parquetRecordMaxRowGroupIndex   = parquetRecordMaxEncodedRowGroup - 1
+	parquetRecordKeyColumn          = 0
+	parquetRecordValueColumn        = 1
+	parquetRecordColumnCount        = 2
+	parquetRecordDefaultPageSize    = 4 << 10
 )
 
 type parquetRecord struct {
@@ -24,19 +29,13 @@ type parquetRecord struct {
 	Value []byte `parquet:"value"`
 }
 
-type parquetRecordKey struct {
-	Key []byte `parquet:"key"`
-}
-
-type parquetRecordValue struct {
-	Value []byte `parquet:"value"`
-}
-
 type parquetRecordStore struct {
-	path      string
-	file      *os.File
-	rowGroups []parquet.RowGroup
-	build     *parquetRecordStoreBuilder
+	path         string
+	file         *os.File
+	rowGroups    []parquet.RowGroup
+	keyReaders   []parquetRecordColumnReader
+	valueReaders []parquetRecordColumnReader
+	build        *parquetRecordStoreBuilder
 }
 
 type parquetRecordStoreBuilder struct {
@@ -48,6 +47,12 @@ type parquetRecordStoreBuilder struct {
 	rowIndex           uint64
 }
 
+type parquetRecordColumnReader struct {
+	mu    sync.Mutex
+	pages parquet.Pages
+	page  parquet.Page
+}
+
 func createParquetRecordStore(path string, options ...parquet.WriterOption) (*parquetRecordStore, error) {
 	config, err := parquet.NewWriterConfig(options...)
 	if err != nil {
@@ -55,6 +60,9 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 	}
 	if config.MaxRowsPerRowGroup == parquet.DefaultMaxRowsPerRowGroup {
 		config.MaxRowsPerRowGroup = parquetRecordMaxRowsPerRowGroup
+	}
+	if config.PageBufferSize == parquet.DefaultPageBufferSize {
+		config.PageBufferSize = parquetRecordDefaultPageSize
 	}
 	if config.MaxRowsPerRowGroup <= 0 || uint64(config.MaxRowsPerRowGroup) > parquetRecordMaxRowsPerRowGroup {
 		return nil, ErrParquet
@@ -89,6 +97,9 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 
 func (s *parquetRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
 	build := s.build
+	if build == nil {
+		return 0, ErrParquet
+	}
 	pos, err := makeParquetRecordPosition(build.rowGroupIndex, build.rowIndex)
 	if err != nil {
 		return 0, err
@@ -196,26 +207,36 @@ func openParquetRecordStore(path string) (*parquetRecordStore, error) {
 
 	ok = true
 	return &parquetRecordStore{
-		path:      path,
-		file:      file,
-		rowGroups: rowGroups,
+		path:         path,
+		file:         file,
+		rowGroups:    rowGroups,
+		keyReaders:   newParquetRecordColumnReaders(rowGroups, parquetRecordKeyColumn),
+		valueReaders: newParquetRecordColumnReaders(rowGroups, parquetRecordValueColumn),
 	}, nil
 }
 
 func (s *parquetRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
-	record, ok := readParquetRecordProjection[parquetRecordKey](s, pos)
+	rowGroup, row, ok := s.recordLocation(pos)
 	if !ok {
 		return nil, false
 	}
-	return record.Key, true
+	key, ok := s.keyReaders[rowGroup].read(row)
+	if !ok {
+		return nil, false
+	}
+	return key, true
 }
 
 func (s *parquetRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
-	record, ok := readParquetRecordProjection[parquetRecordValue](s, pos)
+	rowGroup, row, ok := s.recordLocation(pos)
 	if !ok {
 		return nil, false
 	}
-	return record.Value, true
+	value, ok := s.valueReaders[rowGroup].read(row)
+	if !ok {
+		return nil, false
+	}
+	return value, true
 }
 
 func (s *parquetRecordStore) Len() int {
@@ -227,39 +248,111 @@ func (s *parquetRecordStore) Len() int {
 }
 
 func (s *parquetRecordStore) Close() error {
-	if s.file == nil {
-		return nil
+	var firstErr error
+	for i := range s.keyReaders {
+		if err := s.keyReaders[i].close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	err := s.file.Close()
+	s.keyReaders = nil
+	for i := range s.valueReaders {
+		if err := s.valueReaders[i].close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	s.valueReaders = nil
+	if s.file == nil {
+		return firstErr
+	}
+	if err := s.file.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	s.file = nil
-	return err
+	return firstErr
 }
 
-func readParquetRecordProjection[T any](s *parquetRecordStore, pos minpatricia.Position) (T, bool) {
-	var zero T
+func (s *parquetRecordStore) recordLocation(pos minpatricia.Position) (int, int64, bool) {
 	rowGroup, row, ok := parseParquetRecordPosition(pos)
 	if !ok || rowGroup >= uint64(len(s.rowGroups)) {
-		return zero, false
+		return 0, 0, false
 	}
 
 	group := s.rowGroups[rowGroup]
 	if row >= uint64(group.NumRows()) {
-		return zero, false
+		return 0, 0, false
 	}
-	reader := parquet.NewGenericRowGroupReader[T](group)
-	defer reader.Close()
-	if err := reader.SeekToRow(int64(row)); err != nil {
-		return zero, false
+	return int(rowGroup), int64(row), true
+}
+
+func newParquetRecordColumnReaders(rowGroups []parquet.RowGroup, column int) []parquetRecordColumnReader {
+	readers := make([]parquetRecordColumnReader, len(rowGroups))
+	for i, group := range rowGroups {
+		readers[i].pages = group.ColumnChunks()[column].Pages()
 	}
-	records := [1]T{}
-	n, err := reader.Read(records[:])
+	return readers
+}
+
+func (r *parquetRecordColumnReader) read(row int64) ([]byte, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.pages == nil {
+		return nil, false
+	}
+	if err := r.pages.SeekToRow(row); err != nil {
+		return nil, false
+	}
+	page, err := r.pages.ReadPage()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return zero, false
+		return nil, false
+	}
+	if err != nil {
+		return nil, false
+	}
+	if r.page != nil {
+		parquet.Release(r.page)
+	}
+	r.page = page
+
+	value, ok := firstParquetByteArray(page)
+	if ok {
+		return value, true
+	}
+
+	values := [1]parquet.Value{}
+	n, err := page.Values().ReadValues(values[:])
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false
 	}
 	if n != 1 {
-		return zero, false
+		return nil, false
 	}
-	return records[0], true
+	return values[0].ByteArray(), true
+}
+
+func firstParquetByteArray(page parquet.Page) ([]byte, bool) {
+	if page.Dictionary() != nil {
+		return nil, false
+	}
+	values := page.Data()
+	data, offsets := values.ByteArray()
+	if len(offsets) < 2 {
+		return nil, false
+	}
+	return data[offsets[0]:offsets[1]:offsets[1]], true
+}
+
+func (r *parquetRecordColumnReader) close() error {
+	if r.page != nil {
+		parquet.Release(r.page)
+		r.page = nil
+	}
+	if r.pages == nil {
+		return nil
+	}
+	err := r.pages.Close()
+	r.pages = nil
+	return err
 }
 
 func validateParquetRecordLayout(rowGroups []parquet.RowGroup, rows int64) error {
@@ -269,6 +362,12 @@ func validateParquetRecordLayout(rowGroups []parquet.RowGroup, rows int64) error
 	var total uint64
 	for rowGroup, group := range rowGroups {
 		if uint64(rowGroup) > parquetRecordMaxRowGroupIndex {
+			return ErrParquet
+		}
+		chunks := group.ColumnChunks()
+		if len(chunks) != parquetRecordColumnCount ||
+			chunks[parquetRecordKeyColumn].Type().Kind() != parquet.ByteArray ||
+			chunks[parquetRecordValueColumn].Type().Kind() != parquet.ByteArray {
 			return ErrParquet
 		}
 		groupRows := group.NumRows()
