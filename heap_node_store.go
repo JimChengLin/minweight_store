@@ -1,8 +1,6 @@
-package minweight
+package minweight_store
 
 import "github.com/JimChengLin/minpatricia"
-
-const nodeIDTag = uint64(1) << 63
 
 type heapNodeStore struct {
 	pages []*minpatricia.NodePage
@@ -41,7 +39,7 @@ func (s *heapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 	}
 
 	id := uint64(len(s.pages))
-	if id&nodeIDTag != 0 {
+	if id&minpatriciaHandleTag != 0 {
 		return 0, nil, minpatricia.ErrPositionTag
 	}
 	page := new(minpatricia.NodePage)
@@ -62,4 +60,8 @@ func (s *heapNodeStore) Free(id uint64) error {
 
 func (s *heapNodeStore) LiveNodes() int {
 	return s.live
+}
+
+func (s *heapNodeStore) Close() error {
+	return nil
 }

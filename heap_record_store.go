@@ -1,26 +1,26 @@
-package minweight
+package minweight_store
 
 import "github.com/JimChengLin/minpatricia"
 
-type record struct {
+type heapRecord struct {
 	key   []byte
 	value []byte
 }
 
-type recordStore struct {
-	records []record
+type heapRecordStore struct {
+	records []heapRecord
 	free    []minpatricia.Position
 	live    int
 }
 
-func newRecordStore() *recordStore {
-	return &recordStore{
-		records: make([]record, 1),
+func newHeapRecordStore() *heapRecordStore {
+	return &heapRecordStore{
+		records: make([]heapRecord, 1),
 	}
 }
 
-func (s *recordStore) Add(key, value []byte) minpatricia.Position {
-	rec := record{
+func (s *heapRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+	rec := heapRecord{
 		key:   cloneRecordKey(key),
 		value: cloneBytes(value),
 	}
@@ -31,26 +31,30 @@ func (s *recordStore) Add(key, value []byte) minpatricia.Position {
 		s.free = s.free[:last]
 		s.records[pos] = rec
 		s.live++
-		return pos
+		return pos, nil
 	}
 
 	pos := minpatricia.Position(len(s.records))
 	s.records = append(s.records, rec)
 	s.live++
-	return pos
+	return pos, nil
 }
 
-func (s *recordStore) Free(pos minpatricia.Position) error {
+func (s *heapRecordStore) Delete(key []byte) (minpatricia.Position, error) {
+	return 0, nil
+}
+
+func (s *heapRecordStore) Free(pos minpatricia.Position) error {
 	if pos == 0 || uint64(pos) >= uint64(len(s.records)) || s.records[pos].key == nil {
 		return ErrCorruptIndex
 	}
-	s.records[pos] = record{}
+	s.records[pos] = heapRecord{}
 	s.free = append(s.free, pos)
 	s.live--
 	return nil
 }
 
-func (s *recordStore) Key(pos minpatricia.Position) ([]byte, bool) {
+func (s *heapRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
 	if pos == 0 || uint64(pos) >= uint64(len(s.records)) {
 		return nil, false
 	}
@@ -61,7 +65,7 @@ func (s *recordStore) Key(pos minpatricia.Position) ([]byte, bool) {
 	return rec.key, true
 }
 
-func (s *recordStore) Value(pos minpatricia.Position) ([]byte, bool) {
+func (s *heapRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	if pos == 0 || uint64(pos) >= uint64(len(s.records)) {
 		return nil, false
 	}
@@ -72,8 +76,12 @@ func (s *recordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	return rec.value, true
 }
 
-func (s *recordStore) Len() int {
+func (s *heapRecordStore) Len() int {
 	return s.live
+}
+
+func (s *heapRecordStore) Close() error {
+	return nil
 }
 
 func cloneRecordKey(key []byte) []byte {

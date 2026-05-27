@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package minweight
+package minweight_store
 
 import (
 	"bytes"
@@ -127,7 +127,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 	for extentID, extent := range s.extents {
 		if extent == nil {
 			id := uint64(extentID) * mmapNodeSlotsPerExtent
-			if id&nodeIDTag != 0 {
+			if id&minpatriciaHandleTag != 0 {
 				return 0, nil, minpatricia.ErrPositionTag
 			}
 			extent, err := createMmapNodeExtent(s.dir, uint64(extentID))
@@ -148,7 +148,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 		if !ok {
 			continue
 		}
-		if id&nodeIDTag != 0 {
+		if id&minpatriciaHandleTag != 0 {
 			return 0, nil, minpatricia.ErrPositionTag
 		}
 		s.setPage(id, page)
@@ -157,7 +157,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 
 	extentID := uint64(len(s.extents))
 	id := extentID * mmapNodeSlotsPerExtent
-	if id&nodeIDTag != 0 {
+	if id&minpatriciaHandleTag != 0 {
 		return 0, nil, minpatricia.ErrPositionTag
 	}
 	extent, err := createMmapNodeExtent(s.dir, extentID)
@@ -229,8 +229,37 @@ func (s *mmapNodeStore) Close() error {
 	return firstErr
 }
 
+func (s *mmapNodeStore) Reset() error {
+	if len(s.extents) == 0 || s.extents[0] == nil {
+		return minpatricia.ErrCorruptLayout
+	}
+	var firstErr error
+	for id := len(s.extents) - 1; id >= 1; id-- {
+		extent := s.extents[id]
+		if extent == nil {
+			continue
+		}
+		if err := extent.destroy(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.extents[id] = nil
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+
+	s.extents = s.extents[:1]
+	root := s.extents[0]
+	clear(root.bitmap())
+	root.setUsed(0, true)
+	root.setLiveSlots(1)
+	clear(mmapNodePageBytes(root.page(0)))
+	s.rebuildPageIndex()
+	return nil
+}
+
 func (s *mmapNodeStore) extentFor(id uint64) (*mmapNodeExtent, uint64, error) {
-	if id&nodeIDTag != 0 {
+	if id&minpatriciaHandleTag != 0 {
 		return nil, 0, minpatricia.ErrPositionTag
 	}
 	extentID := id / mmapNodeSlotsPerExtent
@@ -508,6 +537,10 @@ func (e *mmapNodeExtent) bitmap() []byte {
 func (e *mmapNodeExtent) page(slot uint64) *minpatricia.NodePage {
 	offset := (mmapNodeReservedPages + int(slot)) * mmapNodePageSize
 	return (*minpatricia.NodePage)(unsafe.Pointer(&e.data[offset]))
+}
+
+func mmapNodePageBytes(page *minpatricia.NodePage) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(page)), minpatricia.NodeSize)
 }
 
 func (e *mmapNodeExtent) sync() error {

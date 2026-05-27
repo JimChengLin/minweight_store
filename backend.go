@@ -1,4 +1,4 @@
-package minweight
+package minweight_store
 
 import (
 	"bytes"
@@ -8,17 +8,35 @@ import (
 
 type indexBackend struct {
 	index   *minpatricia.Index
-	records *recordStore
-	nodes   minpatricia.NodeStore
+	records indexRecordStore
+	nodes   indexNodeStore
+}
+
+// indexRecordStore is the record backend API that indexBackend needs above
+// minpatricia.RecordStore: appends allocate positions, deletes can append
+// tombstones, and reads resolve positions back to values.
+type indexRecordStore interface {
+	minpatricia.RecordStore
+	Append(key, value []byte) (minpatricia.Position, error)
+	Delete(key []byte) (minpatricia.Position, error)
+	Free(pos minpatricia.Position) error
+	Value(pos minpatricia.Position) ([]byte, bool)
+	Len() int
+	Close() error
+}
+
+type indexNodeStore interface {
+	minpatricia.NodeStore
+	Close() error
 }
 
 func newIndexBackend() *indexBackend {
-	records := newRecordStore()
+	records := newHeapRecordStore()
 	nodes := newHeapNodeStore()
 	return newIndexBackendWithNodes(records, nodes)
 }
 
-func newIndexBackendWithNodes(records *recordStore, nodes minpatricia.NodeStore) *indexBackend {
+func newIndexBackendWithNodes(records indexRecordStore, nodes indexNodeStore) *indexBackend {
 	return &indexBackend{
 		index:   minpatricia.NewWithNodes(records, nodes),
 		records: records,
@@ -26,7 +44,7 @@ func newIndexBackendWithNodes(records *recordStore, nodes minpatricia.NodeStore)
 	}
 }
 
-func openIndexBackend(records *recordStore, nodes minpatricia.NodeStore) (*indexBackend, error) {
+func openIndexBackend(records indexRecordStore, nodes indexNodeStore) (*indexBackend, error) {
 	index, err := minpatricia.OpenWithNodes(records, nodes)
 	if err != nil {
 		return nil, err
@@ -42,8 +60,22 @@ func (b *indexBackend) len() int {
 	return b.index.Len()
 }
 
+func (b *indexBackend) close() error {
+	var firstErr error
+	if err := b.nodes.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := b.records.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
 func (b *indexBackend) put(key, value []byte) error {
-	pos := b.records.Add(key, value)
+	pos, err := b.records.Append(key, value)
+	if err != nil {
+		return err
+	}
 	recordKey, ok := b.records.Key(pos)
 	if !ok {
 		return ErrCorruptIndex
@@ -75,6 +107,9 @@ func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
 }
 
 func (b *indexBackend) delete(key []byte) (bool, error) {
+	if _, err := b.records.Delete(key); err != nil {
+		return false, err
+	}
 	pos, deleted, err := b.index.Delete(key)
 	if err != nil || !deleted {
 		return deleted, err

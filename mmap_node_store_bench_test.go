@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package minweight
+package minweight_store
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ type nodeStoreBenchSize struct {
 
 type nodeStoreBenchData struct {
 	keys      [][]byte
-	records   *recordStore
+	records   *heapRecordStore
 	positions []minpatricia.Position
 }
 
@@ -134,7 +134,7 @@ func benchmarkNodeStores(b *testing.B, sizeName string, data nodeStoreBenchData,
 
 func newNodeStoreBenchData(n int) nodeStoreBenchData {
 	rng := rand.New(rand.NewSource(int64(n)))
-	records := newRecordStore()
+	records := newHeapRecordStore()
 	keys := make([][]byte, 0, n)
 	positions := make([]minpatricia.Position, 0, n)
 	seen := make(map[string]struct{}, n)
@@ -147,7 +147,10 @@ func newNodeStoreBenchData(n int) nodeStoreBenchData {
 		seen[key] = struct{}{}
 
 		keyBytes := []byte(key)
-		pos := records.Add(keyBytes, nil)
+		pos, err := records.Append(keyBytes, nil)
+		if err != nil {
+			panic(err)
+		}
 		keys = append(keys, keyBytes)
 		positions = append(positions, pos)
 	}
@@ -174,7 +177,11 @@ func buildNodeStoreBenchIndex(tb testing.TB, data nodeStoreBenchData, nodes minp
 func newNodeStoreBenchReplacementPositions(data nodeStoreBenchData) []minpatricia.Position {
 	replacements := make([]minpatricia.Position, len(data.keys))
 	for i, key := range data.keys {
-		replacements[i] = data.records.Add(key, nil)
+		pos, err := data.records.Append(key, nil)
+		if err != nil {
+			panic(err)
+		}
+		replacements[i] = pos
 	}
 	return replacements
 }

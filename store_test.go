@@ -1,4 +1,4 @@
-package minweight
+package minweight_store
 
 import (
 	"errors"

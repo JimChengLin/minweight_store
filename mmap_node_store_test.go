@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package minweight
+package minweight_store
 
 import (
 	"bytes"
@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"unsafe"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -268,7 +267,7 @@ func TestMmapNodeStoreReleasesLaterFreeExtents(t *testing.T) {
 
 func TestMmapNodeStorePersistsIndex(t *testing.T) {
 	dir := t.TempDir()
-	records := newRecordStore()
+	records := newHeapRecordStore()
 	nodes, err := openMmapNodeStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +328,4 @@ func TestMmapNodeStorePersistsIndex(t *testing.T) {
 		want = append(want, key+"="+value)
 	}
 	assertItems(t, "reopened mmap index Scan", reopened.scan, want)
-}
-
-func mmapNodePageBytes(page *minpatricia.NodePage) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(page)), minpatricia.NodeSize)
 }

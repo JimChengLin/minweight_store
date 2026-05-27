@@ -1,4 +1,4 @@
-package minweight
+package minweight_store
 
 import (
 	"fmt"
@@ -8,10 +8,13 @@ import (
 )
 
 func TestRecordStoreOwnsRecords(t *testing.T) {
-	records := newRecordStore()
+	records := newHeapRecordStore()
 	key := []byte("alpha")
 	value := []byte("one")
-	pos := records.Add(key, value)
+	pos, err := records.Append(key, value)
+	if err != nil {
+		t.Fatal(err)
+	}
 	key[0] = 'x'
 	value[0] = 'z'
 
@@ -24,7 +27,10 @@ func TestRecordStoreOwnsRecords(t *testing.T) {
 		t.Fatalf("Value(%d) = (%q,%v), want one,true", pos, gotValue, ok)
 	}
 
-	nilKeyPos := records.Add(nil, []byte("empty-key"))
+	nilKeyPos, err := records.Append(nil, []byte("empty-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	gotKey, ok = records.Key(nilKeyPos)
 	if !ok || gotKey == nil || len(gotKey) != 0 {
 		t.Fatalf("Key(%d) = (%v,%v), want non-nil empty key", nilKeyPos, gotKey, ok)
@@ -33,7 +39,10 @@ func TestRecordStoreOwnsRecords(t *testing.T) {
 	if err := records.Free(pos); err != nil {
 		t.Fatal(err)
 	}
-	reused := records.Add([]byte("bravo"), []byte("two"))
+	reused, err := records.Append([]byte("bravo"), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if reused != pos {
 		t.Fatalf("reused position = %d, want %d", reused, pos)
 	}
@@ -79,7 +88,7 @@ func TestIndexBackendUsesExplicitStores(t *testing.T) {
 		}
 	}
 	if backend.records.Len() != backend.len() {
-		t.Fatalf("record len = %d, index len = %d", backend.records.Len(), backend.len())
+		t.Fatalf("heapRecord len = %d, index len = %d", backend.records.Len(), backend.len())
 	}
 	if backend.nodes.LiveNodes() < 2 {
 		t.Fatalf("expected multi-node index, live nodes=%d", backend.nodes.LiveNodes())
