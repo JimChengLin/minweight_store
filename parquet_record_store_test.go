@@ -18,10 +18,7 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 		{Key: []byte{}, Value: []byte("empty-key")},
 	}
 
-	store, positions, err := writeParquetRecordStore(path, input)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, positions := buildParquetRecordStoreForTest(t, path, input)
 	defer store.Close()
 
 	input[0].Key[0] = 'x'
@@ -44,26 +41,62 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = openParquetRecordStore(path)
+	reopened, err := openParquetRecordStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Close()
+	assertParquetRecord(t, reopened, positions[0], "alpha", "one")
+	assertParquetRecord(t, reopened, positions[1], "bravo", "two")
+	assertParquetRecord(t, reopened, positions[2], "", "empty-key")
+}
+
+func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	store, err := createParquetRecordStore(path, parquet.MaxRowsPerRowGroup(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = store.Abort()
+		}
+	}()
+
+	key := []byte("alpha")
+	value := []byte("one")
+	first, err := store.Append(key, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key[0] = 'x'
+	value[0] = 'z'
+
+	second, err := store.Append([]byte("bravo"), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if store.build != nil {
+		t.Fatalf("build state = %v, want nil", store.build)
+	}
+	ok = true
 	defer store.Close()
-	assertParquetRecord(t, store, positions[0], "alpha", "one")
-	assertParquetRecord(t, store, positions[1], "bravo", "two")
-	assertParquetRecord(t, store, positions[2], "", "empty-key")
+
+	assertParquetRecord(t, store, first, "alpha", "one")
+	assertParquetRecord(t, store, second, "bravo", "two")
 }
 
 func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
-	store, positions, err := writeParquetRecordStore(path, []parquetRecord{
+	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 		{Key: []byte("bravo"), Value: []byte("two")},
 		{Key: []byte("charlie"), Value: []byte("three")},
 	}, parquet.MaxRowsPerRowGroup(1))
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer store.Close()
 
 	for i, pos := range positions {
@@ -78,14 +111,22 @@ func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	assertParquetRecord(t, store, positions[2], "charlie", "three")
 }
 
-func TestParquetRecordStoreInvalidPosition(t *testing.T) {
+func TestParquetRecordStoreReadsProjectedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
-	store, _, err := writeParquetRecordStore(path, []parquetRecord{
+	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	defer store.Close()
+
+	assertParquetProjectionColumns[parquetRecordKey](t, store.rowGroups[0], "key")
+	assertParquetProjectionColumns[parquetRecordValue](t, store.rowGroups[0], "value")
+}
+
+func TestParquetRecordStoreInvalidPosition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
+		{Key: []byte("alpha"), Value: []byte("one")},
+	})
 	defer store.Close()
 
 	if key, ok := store.Key(0); ok || key != nil {
@@ -94,17 +135,14 @@ func TestParquetRecordStoreInvalidPosition(t *testing.T) {
 	if value, ok := store.Value(minpatricia.Position(minpatriciaHandleTag)); ok || value != nil {
 		t.Fatalf("Value(tagged) = (%q,%v), want nil,false", value, ok)
 	}
-	if pos, err := makeParquetRecordPosition(parquetRecordMaxRowGroup+1, 0); err == nil || pos != 0 {
+	if pos, err := makeParquetRecordPosition(parquetRecordMaxRowGroupIndex+1, 0); err == nil || pos != 0 {
 		t.Fatalf("makeParquetRecordPosition overflow = (%d,%v), want 0,error", pos, err)
 	}
 }
 
 func TestParquetRecordStoreEmptyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
-	store, positions, err := writeParquetRecordStore(path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, positions := buildParquetRecordStoreForTest(t, path, nil)
 	defer store.Close()
 
 	if store.Len() != 0 {
@@ -117,14 +155,11 @@ func TestParquetRecordStoreEmptyFile(t *testing.T) {
 
 func TestParquetRecordStoreWorksWithMinpatricia(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
-	store, positions, err := writeParquetRecordStore(path, []parquetRecord{
+	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("delta"), Value: []byte("four")},
 		{Key: []byte("alpha"), Value: []byte("one")},
 		{Key: []byte("charlie"), Value: []byte("three")},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer store.Close()
 
 	index := minpatricia.NewWithRecords(store)
@@ -155,4 +190,46 @@ func assertParquetRecord(t *testing.T, store *parquetRecordStore, pos minpatrici
 	if !ok || string(gotValue) != value {
 		t.Fatalf("Value(%d) = (%q,%v), want %q,true", pos, gotValue, ok, value)
 	}
+}
+
+func assertParquetProjectionColumns[T any](t *testing.T, rowGroup parquet.RowGroup, column string) {
+	t.Helper()
+
+	reader := parquet.NewGenericRowGroupReader[T](rowGroup)
+	defer reader.Close()
+
+	columns := reader.Schema().Columns()
+	if len(columns) != 1 || len(columns[0]) != 1 || columns[0][0] != column {
+		t.Fatalf("projection columns = %v, want [[%s]]", columns, column)
+	}
+}
+
+func buildParquetRecordStoreForTest(t testing.TB, path string, records []parquetRecord, options ...parquet.WriterOption) (*parquetRecordStore, []minpatricia.Position) {
+	t.Helper()
+
+	store, err := createParquetRecordStore(path, options...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = store.Abort()
+		}
+	}()
+
+	positions := make([]minpatricia.Position, 0, len(records))
+	for i := range records {
+		pos, err := store.Append(records[i].Key, records[i].Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		positions = append(positions, pos)
+	}
+
+	if err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ok = true
+	return store, positions
 }
