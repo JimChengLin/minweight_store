@@ -111,11 +111,15 @@ func removeManifest(path string) error {
 	return syncDir(filepath.Dir(path))
 }
 
-func syncDir(dir string) error {
+func syncDir(dir string) (err error) {
 	file, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	return file.Sync()
 }

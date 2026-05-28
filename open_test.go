@@ -41,7 +41,7 @@ func TestOpenReplaysWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	value, ok, err := store.Get([]byte("bravo"))
 	if err != nil || !ok || string(value) != "two-replaced" {
@@ -76,7 +76,7 @@ func TestOpenResetsPersistedIndexBeforeReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	if store.backend.nodes.LiveNodes() < 2 {
 		t.Fatalf("LiveNodes after replay = %d, want multi-node index", store.backend.nodes.LiveNodes())
@@ -116,7 +116,7 @@ func TestOpenCleanManifestSkipsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
 	if _, err := os.Stat(filepath.Join(dir, manifestName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("manifest after Open err = %v, want not exist", err)
@@ -153,7 +153,7 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
 	assertGet(t, store, "bravo", "two")
 }
@@ -189,7 +189,7 @@ func TestWALRecordCRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer wal.Close()
+	defer closeForTest(t, wal)
 
 	pos, err := wal.Append([]byte("alpha"), []byte("one"))
 	if err != nil {
@@ -221,7 +221,7 @@ func TestOpenPointInTimeTruncatesCorruptWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	assertGet(t, store, "alpha", "one")
 	assertMissing(t, store, "bravo")
@@ -242,7 +242,7 @@ func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	assertGet(t, store, "alpha", "one")
 	assertMissing(t, store, "bravo")
@@ -275,7 +275,7 @@ func TestWALFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	err = store.Put([]byte("alpha"), []byte("value-too-large"))
 	if !errors.Is(err, ErrWalFull) {
@@ -288,7 +288,7 @@ func TestInvalidKeyDoesNotAdvanceWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	wal := store.wal
 	used := wal.used

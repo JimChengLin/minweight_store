@@ -46,7 +46,7 @@ func BenchmarkRecordStoreRead(b *testing.B) {
 		})
 		b.Run(size.name+"/wal_mmap", func(b *testing.B) {
 			wal, fixture := buildMmapWALRecordStoreBenchFixture(b, data)
-			defer wal.Close()
+			defer closeForTest(b, wal)
 			b.ReportAllocs()
 			b.ResetTimer()
 
@@ -86,7 +86,7 @@ func BenchmarkRecordStorePutBatch(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer wal.Close()
+			defer closeForTest(b, wal)
 
 			benchmarkRecordStoreBatch(b, size.n, func() {
 				wal.used = walHeaderSize
@@ -125,7 +125,7 @@ func BenchmarkStoreGetRecordBackend(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer store.Close()
+			defer closeForTest(b, store)
 			loadStoreBenchData(b, store, data)
 			b.ReportAllocs()
 			b.ResetTimer()

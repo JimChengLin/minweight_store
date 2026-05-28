@@ -17,7 +17,7 @@ func TestMmapNodeStoreAllocFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	if nodes.LiveNodes() != 1 {
 		t.Fatalf("LiveNodes after open = %d, want 1", nodes.LiveNodes())
@@ -61,7 +61,7 @@ func TestMmapNodeStoreDoesNotClearReusedPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	id, page, err := nodes.Alloc()
 	if err != nil {
@@ -92,7 +92,7 @@ func TestMmapNodeStoreCreatesMultipleExtents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	var last uint64
 	for i := 0; i < mmapNodeSlotsPerExtent; i++ {
@@ -123,7 +123,7 @@ func TestMmapNodeStoreAllocSkipsFullBitmapBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	extent := nodes.extents[0]
 	bitmap := extent.bitmap()
@@ -166,7 +166,7 @@ func TestMmapNodeStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	if nodes.LiveNodes() != 2 {
 		t.Fatalf("LiveNodes after reopen = %d, want 2", nodes.LiveNodes())
@@ -300,7 +300,7 @@ func TestMmapNodeStorePersistsIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodes.Close()
+	defer closeForTest(t, nodes)
 
 	reopened, err := openIndexBackend(records, nodes)
 	if err != nil {

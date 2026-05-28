@@ -20,7 +20,7 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 	}
 
 	store, positions := buildParquetRecordStoreForTest(t, path, input)
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	input[0].Key[0] = 'x'
 	input[0].Value[0] = 'z'
@@ -46,7 +46,7 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer closeForTest(t, reopened)
 	assertParquetRecord(t, reopened, positions[0], "alpha", "one")
 	assertParquetRecord(t, reopened, positions[1], "bravo", "two")
 	assertParquetRecord(t, reopened, positions[2], "", "empty-key")
@@ -85,7 +85,7 @@ func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
 		t.Fatalf("build state = %v, want nil", store.build)
 	}
 	ok = true
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	assertParquetRecord(t, store, first, "alpha", "one")
 	assertParquetRecord(t, store, second, "bravo", "two")
@@ -96,7 +96,7 @@ func TestParquetRecordStoreAppendAfterSyncFails(t *testing.T) {
 	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 	})
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	pos, err := store.Append([]byte("bravo"), []byte("two"))
 	if pos != 0 || !errors.Is(err, ErrParquet) {
@@ -111,7 +111,7 @@ func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 		{Key: []byte("bravo"), Value: []byte("two")},
 		{Key: []byte("charlie"), Value: []byte("three")},
 	}, parquet.MaxRowsPerRowGroup(1))
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	for i, pos := range positions {
 		rowGroup, row, ok := parseParquetRecordPosition(pos)
@@ -130,7 +130,7 @@ func TestParquetRecordStoreUsesByteArrayColumns(t *testing.T) {
 	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 	})
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	chunks := store.rowGroups[0].ColumnChunks()
 	if len(chunks) != parquetRecordColumnCount {
@@ -159,7 +159,7 @@ func TestParquetRecordStoreDefaultPageSize(t *testing.T) {
 	}
 
 	store, _ := buildParquetRecordStoreForTest(t, path, records)
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	offsetIndex, err := store.rowGroups[0].ColumnChunks()[parquetRecordValueColumn].OffsetIndex()
 	if err != nil {
@@ -175,7 +175,7 @@ func TestParquetRecordStoreInvalidPosition(t *testing.T) {
 	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
 	})
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	if key, ok := store.Key(0); ok || key != nil {
 		t.Fatalf("Key(0) = (%q,%v), want nil,false", key, ok)
@@ -191,7 +191,7 @@ func TestParquetRecordStoreInvalidPosition(t *testing.T) {
 func TestParquetRecordStoreEmptyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, positions := buildParquetRecordStoreForTest(t, path, nil)
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	if store.Len() != 0 {
 		t.Fatalf("Len = %d, want 0", store.Len())
@@ -208,7 +208,7 @@ func TestParquetRecordStoreWorksWithMinpatricia(t *testing.T) {
 		{Key: []byte("alpha"), Value: []byte("one")},
 		{Key: []byte("charlie"), Value: []byte("three")},
 	})
-	defer store.Close()
+	defer closeForTest(t, store)
 
 	index := minpatricia.NewWithRecords(store)
 	for i, key := range [][]byte{[]byte("delta"), []byte("alpha"), []byte("charlie")} {

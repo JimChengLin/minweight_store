@@ -59,7 +59,7 @@ func BenchmarkParquetRecordStoreRandomRead(b *testing.B) {
 	for _, size := range parquetRecordStoreBenchSizes {
 		data := newParquetRecordStoreBenchData(size.n)
 		store, positions := buildParquetRecordStoreForTest(b, filepath.Join(b.TempDir(), "records.parquet"), recordsFromParquetBenchData(data))
-		defer store.Close()
+		defer closeForTest(b, store)
 
 		order := positionsByParquetRecordStoreBenchOrder(positions, randomParquetRecordStoreBenchOrder(size.n))
 		benchmarkParquetRecordStoreReads(b, size.name, store, order)
@@ -70,7 +70,7 @@ func BenchmarkParquetRecordStoreSequentialRead(b *testing.B) {
 	for _, size := range parquetRecordStoreBenchSizes {
 		data := newParquetRecordStoreBenchData(size.n)
 		store, positions := buildParquetRecordStoreForTest(b, filepath.Join(b.TempDir(), "records.parquet"), recordsFromParquetBenchData(data))
-		defer store.Close()
+		defer closeForTest(b, store)
 
 		order := positionsByParquetRecordStoreBenchOrder(positions, sequentialParquetRecordStoreBenchOrder(size.n))
 		benchmarkParquetRecordStoreReads(b, size.name, store, order)
@@ -81,7 +81,7 @@ func BenchmarkParquetRecordStoreSeekSequentialRead(b *testing.B) {
 	for _, size := range parquetRecordStoreBenchSizes {
 		data := newParquetRecordStoreBenchData(size.n)
 		store, _ := buildParquetRecordStoreForTest(b, filepath.Join(b.TempDir(), "records.parquet"), recordsFromParquetBenchData(data))
-		defer store.Close()
+		defer closeForTest(b, store)
 
 		b.Run(size.name+"/key", func(b *testing.B) {
 			benchmarkParquetRecordStoreSeekSequentialRead[parquetRecordKey](b, store, func(record parquetRecordKey) int {
