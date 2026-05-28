@@ -10,8 +10,9 @@ import (
 )
 
 type Options struct {
-	WALSize         int64
-	WALReplayPolicy WALReplayPolicy
+	WALSize           int64
+	WALReplayPolicy   WALReplayPolicy
+	VerifyIndexOnRead bool
 }
 
 func Open(dir string, options ...Options) (*Store, error) {
@@ -65,6 +66,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 			return nil, err
 		}
 	}
+	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
 	return &Store{
 		backend:             opened.backend,
 		manifest:            manifest,

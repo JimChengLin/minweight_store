@@ -55,6 +55,67 @@ func TestPutGetDelete(t *testing.T) {
 	}
 }
 
+func TestVerifyIndexOnReadOption(t *testing.T) {
+	store, err := Open(t.TempDir(), Options{
+		WALSize:           1 << 20,
+		VerifyIndexOnRead: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	if !store.backend.verifyIndexOnRead {
+		t.Fatalf("verifyIndexOnRead = false, want true")
+	}
+	for _, key := range []string{"alpha", "bravo", "charlie"} {
+		if err := store.Put([]byte(key), []byte("value-"+key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, ok, err := store.Get([]byte("alpha"))
+	if err != nil || !ok || string(got) != "value-alpha" {
+		t.Fatalf("Get(alpha) = (%q,%v,%v), want value-alpha,true,nil", got, ok, err)
+	}
+	item, ok, err := store.SeekGE([]byte("between"))
+	if err != nil || !ok || string(item.Key) != "bravo" || string(item.Value) != "value-bravo" {
+		t.Fatalf("SeekGE(between) = (%q,%q,%v,%v), want bravo,value-bravo,true,nil", item.Key, item.Value, ok, err)
+	}
+	assertItems(t, "Scan with verify_index_on_read", store.Scan, []string{
+		"alpha=value-alpha",
+		"bravo=value-bravo",
+		"charlie=value-charlie",
+	})
+}
+
+func TestVerifyIndexOnReadDetectsPositionChange(t *testing.T) {
+	store := New()
+	store.backend.verifyIndexOnRead = true
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	newAlphaPos, err := store.backend.records.Append([]byte("alpha"), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mutateErr error
+	store.backend.records = &mutatingValueRecordStore{
+		indexRecordStore: store.backend.records,
+		mutate: func() {
+			_, _, mutateErr = store.backend.index.Put([]byte("alpha"), newAlphaPos)
+		},
+	}
+	_, ok, err := store.Get([]byte("alpha"))
+	if mutateErr != nil {
+		t.Fatal(mutateErr)
+	}
+	if !errors.Is(err, ErrCorruptIndex) || ok {
+		t.Fatalf("Get(alpha) after position change = (ok=%v, err=%v), want false,%v", ok, err, ErrCorruptIndex)
+	}
+}
+
 func TestDeleteMissingDoesNotWriteTombstone(t *testing.T) {
 	records := &deleteCountingRecordStore{
 		heapRecordStore: newHeapRecordStore(),
@@ -366,4 +427,19 @@ type deleteCountingRecordStore struct {
 func (s *deleteCountingRecordStore) Delete(key []byte) (minpatricia.Position, error) {
 	s.deletes++
 	return s.heapRecordStore.Delete(key)
+}
+
+type mutatingValueRecordStore struct {
+	indexRecordStore
+	mutate func()
+}
+
+func (s *mutatingValueRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
+	value, ok := s.indexRecordStore.Value(pos)
+	if s.mutate != nil {
+		mutate := s.mutate
+		s.mutate = nil
+		mutate()
+	}
+	return value, ok
 }

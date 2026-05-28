@@ -7,9 +7,10 @@ import (
 )
 
 type indexBackend struct {
-	index   *minpatricia.Index
-	records indexRecordStore
-	nodes   indexNodeStore
+	index             *minpatricia.Index
+	records           indexRecordStore
+	nodes             indexNodeStore
+	verifyIndexOnRead bool
 }
 
 // indexRecordStore is the record backend API that indexBackend needs above
@@ -152,6 +153,9 @@ func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
 	value, ok := b.records.Value(pos)
 	if !ok {
 		return nil, false, ErrCorruptIndex
+	}
+	if err := b.verifyReadPosition(key, pos); err != nil {
+		return nil, false, err
 	}
 	return cloneBytes(value), true, nil
 }
@@ -320,8 +324,25 @@ func (b *indexBackend) item(key []byte, pos minpatricia.Position) (Item, error) 
 	if !ok {
 		return Item{}, ErrCorruptIndex
 	}
+	if err := b.verifyReadPosition(key, pos); err != nil {
+		return Item{}, err
+	}
 	return Item{
 		Key:   cloneBytes(key),
 		Value: cloneBytes(value),
 	}, nil
+}
+
+func (b *indexBackend) verifyReadPosition(key []byte, pos minpatricia.Position) error {
+	if !b.verifyIndexOnRead {
+		return nil
+	}
+	got, ok, err := b.index.Get(key)
+	if err != nil {
+		return err
+	}
+	if !ok || got != pos {
+		return ErrCorruptIndex
+	}
+	return nil
 }
