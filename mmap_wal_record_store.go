@@ -441,12 +441,3 @@ func walRecordCRC(record []byte) uint32 {
 	_, _ = crc.Write(record[walRecordHeaderSize:])
 	return crc.Sum32()
 }
-
-func isZeroBytes(data []byte) bool {
-	for _, b := range data {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
-}

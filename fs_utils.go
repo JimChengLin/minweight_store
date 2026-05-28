@@ -299,7 +299,7 @@ func copyDifferentMmapNodeUsedPages(src, dst, bitmap []byte) bool {
 		runLen = 0
 	}
 	for slot := uint64(0); slot < mmapNodeSlotsPerExtent; slot++ {
-		if mmapNodeBitmapUsed(bitmap, slot) {
+		if bitsetGet(bitmap, slot) {
 			if runLen == 0 {
 				runStart = slot
 			}
@@ -402,7 +402,7 @@ func copyMmapNodeExtentFileSparse(src, dst string) error {
 		return err
 	}
 	for slot := uint64(0); slot < mmapNodeSlotsPerExtent; slot++ {
-		if mmapNodeBitmapUsed(bitmap, slot) {
+		if bitsetGet(bitmap, slot) {
 			if runLen == 0 {
 				runStart = slot
 			}

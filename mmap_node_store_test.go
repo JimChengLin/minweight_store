@@ -129,7 +129,7 @@ func TestMmapNodeStoreAllocSkipsFullBitmapBytes(t *testing.T) {
 	extent := nodes.extents[0]
 	bitmap := extent.bitmap()
 	for byteIndex := 0; byteIndex < mmapNodeBitmapBytes; byteIndex++ {
-		bitmap[byteIndex] = mmapNodeBitmapByteMask(byteIndex)
+		bitmap[byteIndex] = bitsetByteMask(byteIndex, mmapNodeSlotsPerExtent)
 	}
 	lastSlot := uint64(mmapNodeSlotsPerExtent - 1)
 	extent.setUsed(lastSlot, false)

@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -554,57 +553,26 @@ func (e *mmapNodeExtent) setLiveSlots(liveSlots uint32) {
 }
 
 func (e *mmapNodeExtent) alloc() (uint64, *minpatricia.NodePage, bool) {
-	bitmap := e.bitmap()
-	for byteIndex := 0; byteIndex < mmapNodeBitmapBytes; byteIndex++ {
-		usable := mmapNodeBitmapByteMask(byteIndex)
-		if bitmap[byteIndex]&usable == usable {
-			continue
-		}
-		for bit := uint64(0); bit < 8; bit++ {
-			mask := byte(1 << bit)
-			if usable&mask == 0 || bitmap[byteIndex]&mask != 0 {
-				continue
-			}
-			slot := uint64(byteIndex)*8 + bit
-			// Page bytes are intentionally left untouched; the caller initializes node content.
-			e.setUsed(slot, true)
-			e.setLiveSlots(e.liveSlots() + 1)
-			return e.id*mmapNodeSlotsPerExtent + slot, e.page(slot), true
-		}
+	slot, ok := bitsetFirstZero(e.bitmap(), mmapNodeSlotsPerExtent)
+	if !ok {
+		return 0, nil, false
 	}
-	return 0, nil, false
+	// Page bytes are intentionally left untouched; the caller initializes node content.
+	e.setUsed(slot, true)
+	e.setLiveSlots(e.liveSlots() + 1)
+	return e.id*mmapNodeSlotsPerExtent + slot, e.page(slot), true
 }
 
 func (e *mmapNodeExtent) used(slot uint64) bool {
-	b := e.bitmap()[slot/8]
-	mask := byte(1 << (slot % 8))
-	return b&mask != 0
+	return bitsetGet(e.bitmap(), slot)
 }
 
 func (e *mmapNodeExtent) setUsed(slot uint64, used bool) {
-	bitmap := e.bitmap()
-	mask := byte(1 << (slot % 8))
-	if used {
-		bitmap[slot/8] |= mask
-		return
-	}
-	bitmap[slot/8] &^= mask
+	bitsetSet(e.bitmap(), slot, used)
 }
 
 func (e *mmapNodeExtent) countUsed() uint32 {
-	var count uint32
-	bitmap := e.bitmap()
-	for byteIndex := 0; byteIndex < mmapNodeBitmapBytes; byteIndex++ {
-		count += uint32(bits.OnesCount8(bitmap[byteIndex] & mmapNodeBitmapByteMask(byteIndex)))
-	}
-	return count
-}
-
-func mmapNodeBitmapByteMask(byteIndex int) byte {
-	if byteIndex != mmapNodeBitmapBytes-1 || mmapNodeSlotsPerExtent%8 == 0 {
-		return 0xff
-	}
-	return byte((1 << (mmapNodeSlotsPerExtent % 8)) - 1)
+	return uint32(bitsetCount(e.bitmap(), mmapNodeSlotsPerExtent))
 }
 
 func (e *mmapNodeExtent) bitmap() []byte {
@@ -708,10 +676,4 @@ func msyncMmap(data []byte) error {
 		return errno
 	}
 	return nil
-}
-
-func mmapNodeBitmapUsed(bitmap []byte, slot uint64) bool {
-	b := bitmap[slot/8]
-	mask := byte(1 << (slot % 8))
-	return b&mask != 0
 }
