@@ -82,7 +82,7 @@ func BenchmarkRecordStorePutBatch(b *testing.B) {
 			})
 		})
 		b.Run(size.name+"/wal_mmap", func(b *testing.B) {
-			wal, err := openMmapWALRecordStore(filepath.Join(b.TempDir(), "wal"), walBenchSize(data, 1))
+			wal, err := openMmapWALRecordStore(filepath.Join(b.TempDir(), walSegmentName(firstWALSegmentNo)), walBenchSize(data, 1), firstWALSegmentNo)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -185,7 +185,7 @@ func buildHeapRecordStoreBenchFixture(data recordBackendBenchData) recordBackend
 func buildMmapWALRecordStoreBenchFixture(tb testing.TB, data recordBackendBenchData) (*mmapWALRecordStore, recordBackendBenchFixture) {
 	tb.Helper()
 
-	wal, err := openMmapWALRecordStore(filepath.Join(tb.TempDir(), "wal"), walBenchSize(data, 1))
+	wal, err := openMmapWALRecordStore(filepath.Join(tb.TempDir(), walSegmentName(firstWALSegmentNo)), walBenchSize(data, 1), firstWALSegmentNo)
 	if err != nil {
 		tb.Fatal(err)
 	}

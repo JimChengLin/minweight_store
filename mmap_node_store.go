@@ -354,9 +354,9 @@ func createMmapNodeExtent(dir string, id uint64) (*mmapNodeExtent, error) {
 		return nil, err
 	}
 
-	ok := false
+	extentOwnedByCaller := false
 	defer func() {
-		if !ok {
+		if !extentOwnedByCaller {
 			_ = file.Close()
 			_ = os.Remove(path)
 		}
@@ -376,7 +376,7 @@ func createMmapNodeExtent(dir string, id uint64) (*mmapNodeExtent, error) {
 		data: data,
 	}
 	extent.writeMeta(0)
-	ok = true
+	extentOwnedByCaller = true
 	return extent, nil
 }
 
@@ -385,9 +385,9 @@ func openMmapNodeExtent(path string, id uint64) (*mmapNodeExtent, error) {
 	if err != nil {
 		return nil, err
 	}
-	ok := false
+	extentOwnedByCaller := false
 	defer func() {
-		if !ok {
+		if !extentOwnedByCaller {
 			_ = file.Close()
 		}
 	}()
@@ -413,7 +413,7 @@ func openMmapNodeExtent(path string, id uint64) (*mmapNodeExtent, error) {
 		_ = syscall.Munmap(data)
 		return nil, err
 	}
-	ok = true
+	extentOwnedByCaller = true
 	return extent, nil
 }
 

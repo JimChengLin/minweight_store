@@ -74,9 +74,9 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 		return nil, err
 	}
 
-	ok := false
+	storeOwnedByCaller := false
 	defer func() {
-		if !ok {
+		if !storeOwnedByCaller {
 			_ = file.Close()
 			_ = os.Remove(tmp)
 		}
@@ -91,7 +91,7 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 			maxRowsPerRowGroup: uint64(config.MaxRowsPerRowGroup),
 		},
 	}
-	ok = true
+	storeOwnedByCaller = true
 	return store, nil
 }
 
@@ -185,9 +185,9 @@ func openParquetRecordStore(path string) (*parquetRecordStore, error) {
 		return nil, err
 	}
 
-	ok := false
+	storeOwnedByCaller := false
 	defer func() {
-		if !ok {
+		if !storeOwnedByCaller {
 			_ = file.Close()
 		}
 	}()
@@ -205,7 +205,7 @@ func openParquetRecordStore(path string) (*parquetRecordStore, error) {
 		return nil, err
 	}
 
-	ok = true
+	storeOwnedByCaller = true
 	return &parquetRecordStore{
 		path:         path,
 		file:         file,

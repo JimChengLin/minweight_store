@@ -10,6 +10,7 @@ var (
 	ErrInvalidRange = errors.New("minweight_store: invalid range")
 	ErrCorruptIndex = errors.New("minweight_store: index points to missing record")
 	ErrWalFull      = errors.New("minweight_store: wal is full")
+	ErrWalSealed    = errors.New("minweight_store: wal segment is sealed")
 	ErrCorruptWAL   = errors.New("minweight_store: corrupt wal")
 	ErrClosed       = errors.New("minweight_store: store is closed")
 	ErrFatal        = errors.New("minweight_store: store is fatal")
@@ -19,11 +20,13 @@ var (
 )
 
 type Store struct {
-	mu       sync.RWMutex
-	backend  *indexBackend
-	manifest *manifest
-	wal      *mmapWALRecordStore
-	fatal    error
+	secondaryIndexMu    sync.Mutex
+	primaryMu           sync.RWMutex
+	backend             *indexBackend
+	manifest            *manifest
+	records             *segmentedRecordStore
+	checkpointWALFileNo uint64
+	fatal               error
 }
 
 type Item struct {
@@ -40,8 +43,8 @@ func New() *Store {
 }
 
 func (s *Store) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	if s.backend == nil || s.fatal != nil {
 		return 0
@@ -50,23 +53,41 @@ func (s *Store) Len() int {
 }
 
 func (s *Store) Put(key, value []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		s.primaryMu.Lock()
+		backend, err := s.openBackend()
+		if err != nil {
+			s.primaryMu.Unlock()
+			return err
+		}
+		result, err := backend.put(key, value)
+		walFullNotAccepted := errors.Is(err, ErrWalFull) && result == backendMutationNotAccepted
+		canFlush := false
+		if s.records != nil && s.manifest != nil {
+			active := s.records.activeSegment()
+			canFlush = active != nil && active.used != walHeaderSize
+		}
+		s.primaryMu.Unlock()
 
-	backend, err := s.openBackend()
-	if err != nil {
+		if walFullNotAccepted {
+			if !canFlush {
+				return err
+			}
+			if flushErr := s.flush(); flushErr != nil {
+				return s.mayMarkFatal(flushErr)
+			}
+			continue
+		}
+		if err != nil && result == backendMutationAcceptedThenFailed {
+			return s.mayMarkFatal(err)
+		}
 		return err
 	}
-	result, err := backend.put(key, value)
-	if err != nil && result == backendMutationAcceptedThenFailed {
-		return s.markFatal(err)
-	}
-	return err
 }
 
 func (s *Store) Get(key []byte) ([]byte, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -76,23 +97,41 @@ func (s *Store) Get(key []byte) ([]byte, bool, error) {
 }
 
 func (s *Store) Delete(key []byte) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		s.primaryMu.Lock()
+		backend, err := s.openBackend()
+		if err != nil {
+			s.primaryMu.Unlock()
+			return false, err
+		}
+		deleted, result, err := backend.delete(key)
+		walFullNotAccepted := errors.Is(err, ErrWalFull) && result == backendMutationNotAccepted
+		canFlush := false
+		if s.records != nil && s.manifest != nil {
+			active := s.records.activeSegment()
+			canFlush = active != nil && active.used != walHeaderSize
+		}
+		s.primaryMu.Unlock()
 
-	backend, err := s.openBackend()
-	if err != nil {
-		return false, err
+		if walFullNotAccepted {
+			if !canFlush {
+				return deleted, err
+			}
+			if flushErr := s.flush(); flushErr != nil {
+				return deleted, s.mayMarkFatal(flushErr)
+			}
+			continue
+		}
+		if err != nil && result == backendMutationAcceptedThenFailed {
+			return deleted, s.mayMarkFatal(err)
+		}
+		return deleted, err
 	}
-	deleted, result, err := backend.delete(key)
-	if err != nil && result == backendMutationAcceptedThenFailed {
-		return deleted, s.markFatal(err)
-	}
-	return deleted, err
 }
 
 func (s *Store) Scan(fn VisitFunc) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -102,8 +141,8 @@ func (s *Store) Scan(fn VisitFunc) error {
 }
 
 func (s *Store) ScanRange(greaterOrEqual, lessThan []byte, fn VisitFunc) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -113,8 +152,8 @@ func (s *Store) ScanRange(greaterOrEqual, lessThan []byte, fn VisitFunc) error {
 }
 
 func (s *Store) ReverseScan(fn VisitFunc) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -124,8 +163,8 @@ func (s *Store) ReverseScan(fn VisitFunc) error {
 }
 
 func (s *Store) ReverseScanRange(lessOrEqual, greaterThan []byte, fn VisitFunc) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -135,8 +174,8 @@ func (s *Store) ReverseScanRange(lessOrEqual, greaterThan []byte, fn VisitFunc) 
 }
 
 func (s *Store) SeekGE(key []byte) (Item, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -146,8 +185,8 @@ func (s *Store) SeekGE(key []byte) (Item, bool, error) {
 }
 
 func (s *Store) SeekLE(key []byte) (Item, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
@@ -157,33 +196,31 @@ func (s *Store) SeekLE(key []byte) (Item, bool, error) {
 }
 
 func (s *Store) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.secondaryIndexMu.Lock()
+	defer s.secondaryIndexMu.Unlock()
 
+	s.primaryMu.Lock()
 	if s.backend == nil {
+		s.primaryMu.Unlock()
 		return nil
 	}
-	backend := s.backend
-	fatal := s.fatal
-	manifest := s.manifest
-	wal := s.wal
-	s.backend = nil
-	s.manifest = nil
-	s.wal = nil
 
-	var firstErr error
-	if fatal == nil && manifest != nil && wal != nil {
-		if err := backend.sync(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if firstErr == nil {
-			if err := manifest.write(wal.used); err != nil {
-				firstErr = err
-			}
+	firstErr := s.fatal
+	if firstErr == nil {
+		if err := s.closeCheckpointWithPrimaryLocked(); err != nil {
+			firstErr = errors.Join(ErrFatal, err)
+			s.fatal = firstErr
 		}
 	}
-	if err := backend.close(); err != nil && firstErr == nil {
-		firstErr = err
+
+	backend := s.backend
+	s.backend = nil
+	s.manifest = nil
+	s.records = nil
+	s.primaryMu.Unlock()
+
+	if err := backend.close(); err != nil {
+		firstErr = errors.Join(firstErr, err)
 	}
 	return firstErr
 }
@@ -198,7 +235,24 @@ func (s *Store) openBackend() (*indexBackend, error) {
 	return s.backend, nil
 }
 
-func (s *Store) markFatal(err error) error {
+func (s *Store) flush() error {
+	s.secondaryIndexMu.Lock()
+	defer s.secondaryIndexMu.Unlock()
+
+	return s.flushWithSecondaryLocked()
+}
+
+func (s *Store) mayMarkFatal(err error) error {
+	if errors.Is(err, ErrClosed) {
+		return err
+	}
+
+	s.primaryMu.Lock()
+	defer s.primaryMu.Unlock()
+
+	if s.fatal != nil {
+		return s.fatal
+	}
 	s.fatal = errors.Join(ErrFatal, err)
 	return s.fatal
 }

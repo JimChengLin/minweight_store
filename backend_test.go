@@ -80,15 +80,17 @@ func TestHeapNodeStoreAllocFree(t *testing.T) {
 }
 
 func TestIndexBackendUsesExplicitStores(t *testing.T) {
-	backend := newIndexBackend()
+	records := newHeapRecordStore()
+	nodes := newHeapNodeStore()
+	backend := newIndexBackendWithNodes(records, nodes)
 	for i := 0; i < minpatricia.MaxNodeReps+50; i++ {
 		key := fmt.Sprintf("key-%04d", i)
 		if _, err := backend.put([]byte(key), []byte("value-"+key)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if backend.records.Len() != backend.len() {
-		t.Fatalf("heapRecord len = %d, index len = %d", backend.records.Len(), backend.len())
+	if records.Len() != backend.len() {
+		t.Fatalf("heapRecord len = %d, index len = %d", records.Len(), backend.len())
 	}
 	if backend.nodes.LiveNodes() < 2 {
 		t.Fatalf("expected multi-node index, live nodes=%d", backend.nodes.LiveNodes())

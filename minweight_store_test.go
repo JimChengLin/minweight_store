@@ -92,6 +92,9 @@ func TestStoreFatalAfterRecordAcceptedIndexFailure(t *testing.T) {
 	if store.Len() != 0 {
 		t.Fatalf("Len after fatal = %d, want 0", store.Len())
 	}
+	if err := store.Close(); !errors.Is(err, ErrFatal) {
+		t.Fatalf("Close after fatal err = %v, want %v", err, ErrFatal)
+	}
 }
 
 func TestStoreDoesNotFatalOnRecordAppendFailure(t *testing.T) {
@@ -114,6 +117,27 @@ func TestStoreDoesNotFatalOnRecordAppendFailure(t *testing.T) {
 	_, ok, err := store.Get([]byte("alpha"))
 	if err != nil || ok {
 		t.Fatalf("Get after append failure ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+func TestMayMarkFatalKeepsFirstFatal(t *testing.T) {
+	store := New()
+	first := errors.New("first")
+	second := errors.New("second")
+
+	err := store.mayMarkFatal(first)
+	assertFatalError(t, err)
+	if !errors.Is(err, first) {
+		t.Fatalf("first fatal err = %v, want %v", err, first)
+	}
+
+	err = store.mayMarkFatal(second)
+	assertFatalError(t, err)
+	if !errors.Is(err, first) {
+		t.Fatalf("second fatal err = %v, want original %v", err, first)
+	}
+	if errors.Is(err, second) {
+		t.Fatalf("second fatal err = %v, must not overwrite with %v", err, second)
 	}
 }
 

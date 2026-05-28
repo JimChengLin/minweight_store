@@ -58,9 +58,9 @@ func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := false
+	storeSynced := false
 	defer func() {
-		if !ok {
+		if !storeSynced {
 			_ = store.Abort()
 		}
 	}()
@@ -84,7 +84,7 @@ func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
 	if store.build != nil {
 		t.Fatalf("build state = %v, want nil", store.build)
 	}
-	ok = true
+	storeSynced = true
 	defer closeForTest(t, store)
 
 	assertParquetRecord(t, store, first, "alpha", "one")
@@ -247,9 +247,9 @@ func buildParquetRecordStoreForTest(t testing.TB, path string, records []parquet
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := false
+	storeSynced := false
 	defer func() {
-		if !ok {
+		if !storeSynced {
 			_ = store.Abort()
 		}
 	}()
@@ -266,6 +266,6 @@ func buildParquetRecordStoreForTest(t testing.TB, path string, records []parquet
 	if err := store.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	ok = true
+	storeSynced = true
 	return store, positions
 }

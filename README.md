@@ -35,7 +35,7 @@ Range semantics:
 - `SeekGE` returns the first item whose key is `>= pivot`.
 - `SeekLE` returns the last item whose key is `<= pivot`.
 
-## V1 mmap WAL
+## V1 mmap WAL + flush
 
 ```go
 store, err := minweight_store.Open("db", minweight_store.Options{
@@ -48,22 +48,46 @@ if err != nil {
 defer store.Close()
 ```
 
-`Open` uses a fixed-size mmap WAL as the record store. Index positions point to
-WAL record offsets. A clean `MANIFEST` lets startup reuse the mmap index; without
-one, startup resets the mmap index then replays the WAL to rebuild it. The WAL
-has a file header with magic, version, and logical `used`; each record stores
-op, key length, value length, CRC32, key, and value. There is no per-record magic.
+`Open` uses segmented fixed-size mmap WAL files as the record store. Index
+positions are 63-bit record handles: high 33 bits are WAL file number, low 30
+bits are offset inside that file. The file suffix determines the record-store
+kind; current WAL segments live under `wal/*.wal`.
 
-The clean manifest stores `version`, `wal_used`, and a CRC. `Open` removes it
-before returning a writable store. `Close` writes it back only after WAL and
-index sync succeed.
+`Flush` seals the active WAL, creates a new active WAL, syncs the live primary
+index and sealed WAL, replays the sealed WAL into the secondary checkpoint
+index, syncs and closes the secondary index, then atomically writes `MANIFEST`.
+The live primary index is not switched during flush.
 
-Replay policies:
+`MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
+`next_wal_file_no`, `wal_segment_size`, and a CRC. On startup, a legal manifest
+with an empty WAL tail lets `Open` use the primary runtime index directly:
+no secondary copy, no replay, and no startup flush. If the tail is non-empty,
+`Open` copies the secondary checkpoint index into the primary runtime index,
+replays the active WAL segment after the checkpoint, then syncs the recovered
+primary index. If `Options.WALSize` is unset, `Open` uses manifest
+`wal_segment_size` for future WAL segments; an explicit `Options.WALSize`
+overrides it. Existing WAL segment files are opened at their actual file size.
+When the tail is non-empty, startup also replays it into the secondary
+checkpoint index, syncs secondary, rolls to a new active WAL, and updates
+`MANIFEST`.
+Without a manifest, the WAL directory must be empty, contain only WAL segment
+1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
+rollover. Startup drops that empty segment and rebuilds/syncs the primary index
+by replaying WAL segment 1.
+
+`Close` is a no-op for durability when the active WAL is empty. Otherwise it
+performs a graceful checkpoint by syncing the live primary index and sealed WAL,
+replaying new WAL records into the secondary checkpoint index, rolling to a new
+empty active WAL, syncing that WAL header, then writing `MANIFEST`.
+
+Replay policies apply when rebuilding from WAL and when replaying WAL into the
+secondary checkpoint index:
 
 - `WALReplayStrict`: any corrupt WAL record fails `Open`.
 - `WALReplayPointInTime`: replay the valid prefix and truncate WAL logical used
   to the first corrupt record.
-- `WALReplayBestEffort`: ignore corrupt record bytes and scan forward for later
-  CRC-valid records; WAL logical used is left unchanged.
+- `WALReplayBestEffort`: repair the WAL before replay by keeping CRC-valid
+  records and deleting corrupt bytes, then replay the repaired WAL strictly.
 
-V1 does not implement flush or checkpoint yet.
+Current flush still keeps records in WAL segments; Parquet materialization and
+WAL garbage collection are intentionally left for later versions.

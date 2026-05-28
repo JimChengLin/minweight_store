@@ -59,28 +59,22 @@ Manifest 保存 checkpoint snapshot 元数据：
 
 ```text
 version: u32
-active_index: A | B
-next_wal_id: u64
-replay_wal_id: u64
-replay_offset: u64
-next_seq: u64
-parquets:
-  - id: u64
-    total_entries: u64
-    live_entries: u64
+checkpoint_wal_file_no: u64
+active_wal_file_no: u64
+next_wal_file_no: u64
+wal_segment_size: u64
+crc: u32
 ```
 
 字段语义：
 
 | 字段 | 语义 |
 | --- | --- |
-| `active_index` | 崩溃恢复时可信的 clean index。 |
-| `next_wal_id` | 下一个新建 WAL segment 的 id。 |
-| `replay_wal_id` | 启动恢复时开始 replay 的 WAL segment id。 |
-| `replay_offset` | 启动恢复时开始 replay 的 WAL offset。 |
-| `next_seq` | 下一条 WAL record 应使用的 seq。 |
-| `parquets` | 当前 manifest 认可的 Parquet 文件集合。 |
-| `live_entries` | 截至 manifest 提交时的持久化 live 计数，不包含之后未 checkpoint 的 WAL delta。 |
+| `checkpoint_wal_file_no` | secondary checkpoint index 已经完整应用并落盘的最后一个 WAL segment。 |
+| `active_wal_file_no` | 当前可写 WAL segment。 |
+| `next_wal_file_no` | 下一个新建 WAL segment 的 file number。 |
+| `wal_segment_size` | 上次 checkpoint 使用的 WAL segment 大小；`Options.WALSize` 未设置时作为默认值，显式 option 会覆盖它。 |
+| `crc` | Manifest 固定字段的 CRC32。 |
 
 Manifest 更新必须使用原子替换流程：
 
@@ -94,9 +88,9 @@ fsync(db directory)
 规则：
 
 - Manifest 是 checkpoint snapshot 的提交点。
-- Manifest 提交时引用的 Parquet 文件必须已经完整落盘。
-- Manifest 指向的 `active_index` 必须是完整、干净、可恢复的 index。
-- 普通 `Put/Delete` 不能修改 Manifest 指向的 `active_index`。
+- Manifest 指向的是 secondary checkpoint 的进度，不是 live primary index。
+- Manifest 提交后，secondary checkpoint index 必须已经完整、干净、可恢复。
+- 普通 `Put/Delete` 不能修改 secondary checkpoint index。
 - 启动时必须先 replay WAL 中的 ParquetSetChange，并完成 index sync，再清理不再被引用的 Parquet 文件。
 
 ## 5. WAL
@@ -170,11 +164,9 @@ Index 需要满足：
 运行时维护：
 
 ```text
-clean_index: A | B          // manifest.active_index
-writer_index: A | B         // 当前可写 index，通常是另一个 index
-serving_index: atomic pointer to A or B
+primary_index              // live runtime index
+secondary_index            // manifest checkpoint index，flush 时短暂打开
 current_wal: wal segment
-next_seq: u64
 runtime_live_entries: map[parquet_id]u64
 reader_epoch: epoch/refcount manager
 frozen: bool
@@ -182,11 +174,10 @@ frozen: bool
 
 规则：
 
-- writer 只修改 `writer_index`。
-- reader 只读取 `serving_index`。
-- `clean_index == manifest.active_index`，普通写入不能修改它。
-- 正常情况下 `writer_index == serving_index`，并且 `writer_index != clean_index`。
-- checkpoint 和 compaction 期间会冻结写入，并通过 WAL replay 或 ParquetSetChange 维护可写 index。
+- writer 只修改 `primary_index`。
+- reader 只读取 `primary_index`，不读取 manifest。
+- `secondary_index` 是 manifest checkpoint index，普通写入不能修改它。
+- checkpoint/flush 期间冻结写入，并通过 WAL replay 维护 `secondary_index`。
 - 删除旧文件前必须等待 reader epoch 结束。
 
 ## 8. API 流程
@@ -198,7 +189,7 @@ Put(key, value):
   1. 如果 frozen，阻塞等待。
   2. 分配 seq。
   3. append WAL Put record。
-  4. 更新 writer_index[key] = WAL(wal_id, offset, value_len)。
+  4. 更新 primary_index[key] = WAL(wal_id, offset, value_len)。
   5. 如果旧 location 指向 Parquet_X，则 runtime_live_entries[X] -= 1。
   6. 如果当前 WAL segment 满，触发 checkpoint。
   7. 返回成功。
@@ -216,7 +207,7 @@ Delete(key):
   1. 如果 frozen，阻塞等待。
   2. 分配 seq。
   3. append WAL Delete record。
-  4. 如果 key 存在，从 writer_index 移除。
+  4. 如果 key 存在，从 primary_index 移除。
   5. 如果旧 location 指向 Parquet_X，则 runtime_live_entries[X] -= 1。
   6. 如果当前 WAL segment 满，触发 checkpoint。
   7. 返回成功。
@@ -232,8 +223,7 @@ Delete(key):
 ```text
 Get(key):
   1. 进入 reader epoch。
-  2. idx := atomic_load(serving_index)。
-  3. 查 idx。
+  2. 查 primary_index。
   4. 不存在则退出 epoch，返回 NotFound。
   5. location 是 WAL，则从对应 WAL segment 读取 value。
   6. location 是 Parquet，则从对应 Parquet 读取 value。
@@ -250,77 +240,90 @@ Checkpoint 触发条件：
 - compaction 前发现 WAL 非空。
 - 未来如果提供显式 `Checkpoint()` API，也使用同一流程。
 
-设当前 `clean_index = A`，`writer_index = serving_index = B`。
-`A` 是 manifest 当前信任的 clean index，普通写入不能修改它。
-`B` 是可写 index，已经包含 `A + 当前 WAL replay`。
+当前实现先不把 sealed WAL 编译成 Parquet，也不切换 live index。
+运行时固定有两个 index：
+
+- `primary`：live index，普通读写都访问它。
+- `secondary`：checkpoint index，只在 checkpoint/flush 期间打开、replay、sync、close。
+
+`MANIFEST` 记录 secondary checkpoint 已经覆盖到哪个 WAL segment。
 
 正式流程：
 
 ```text
 1. frozen = true，阻塞 Put/Delete，Get 继续执行。
 
-2. 封存 current_wal：
-   fsync/msync current_wal
-   fsync(wal directory)
-   sealed_wal_id = current_wal.id
-   sealed_end = current_wal.end_offset
+2. old_wal = current_wal。
 
-3. 扫描 sealed WAL 从 replay_offset 到 sealed_end：
-   同 key 只保留最后一次操作。
-   最后是 Delete 的 key 不写入 Parquet。
-   ParquetSetChange 更新 checkpoint 目标 Parquet 集合。
+3. seal old_wal，并创建新的 current_wal。
 
-4. 生成 Parquet_new：
-   写入所有最后状态为 Put 的 key/value。
-   fsync(Parquet_new)
-   fsync(parquet directory)
+4. 并发执行：
+   msync(primary index)
+   msync(old_wal)
 
-5. 在 B 上应用 checkpoint replay：
-   replay 材料是 sealed WAL 的最终状态和 Parquet_new 的 key/position。
-   对物化到 Parquet_new 的 key：
-     B[key] = Parquet(Parquet_new, position)
-   对最后状态为 Delete 的 key：
-     B.remove(key)
-   msync(B)
+5. 打开 secondary checkpoint index。
 
-6. 准备并提交新 manifest：
-   active_index = B
-   next_wal_id = sealed_wal_id + 1
-   replay_wal_id = sealed_wal_id + 1
-   replay_offset = 0
-   next_seq = 当前 next_seq
-   parquets = 扫描 sealed WAL 后得到的目标 Parquet 集合，并加入 Parquet_new
-   parquets 更新 live_entries = runtime_live_entries
-   write tmp -> fsync tmp -> rename -> fsync db directory
+6. replay old_wal。当前 WAL-only checkpoint 模型里，
+   `old_wal.file_no == manifest.checkpoint_wal_file_no + 1`。
 
-7. 重建 A：
-   从旧 clean state 开始 replay sealed WAL。
-   Put 最终状态改写为 Parquet_new location。
-   Delete 最终状态从 A 移除。
-   ParquetSetChange 按 WAL record 应用。
-   msync(A)
+7. msync(secondary index)。
 
-8. atomic_store(serving_index, A)
-   writer_index = A
-   clean_index = B
+8. close(secondary index)。
 
-9. 创建新的 current_wal，id = sealed_wal_id + 1。
+9. msync(new current_wal header)，确保 manifest 引用的新 active WAL 已经存在。
 
-10. frozen = false。
+10. 原子提交 MANIFEST：
+    checkpoint_wal_file_no = old_wal.file_no
+    active_wal_file_no = current_wal.file_no
+    next_wal_file_no = current_wal.file_no + 1
+    wal_segment_size = 当前 WAL segment size
 
-11. 等待旧 reader epoch 结束后，删除 sealed_wal 以及更老且不再需要的 WAL segment。
+11. frozen = false。
 ```
 
 关键顺序不能改变：
 
 ```text
-数据文件落盘 -> 新 primary index 落盘 -> manifest 切换 active_index -> 重建另一个 index -> serving_index 切换
+primary index 与 sealed WAL 落盘 -> secondary checkpoint replay/sync/close -> 新 active WAL header 落盘 -> manifest 提交
 ```
 
-Manifest 不能指向一个尚未应用 checkpoint replay 并落盘的 index。
+Manifest 不能记录一个尚未应用 checkpoint replay 并落盘的 WAL 进度。
 
-如果 manifest 已提交但 A 还没有完成重建就崩溃，启动恢复仍然信任 `active_index = B`，
-然后从 `active_index = B` 逻辑重建 A，再 replay WAL tail。
+如果 manifest 未提交就崩溃，启动从旧 manifest checkpoint 加 WAL tail 恢复。
+如果 manifest 已提交且 WAL tail 为空，启动直接打开 primary runtime index，
+不复制 secondary、不 replay、不做启动时 flush 同步。
+如果 manifest 已提交但 WAL tail 非空，启动复制 secondary checkpoint 到
+primary runtime index，再 replay manifest active WAL tail，
+并 sync primary。这次 replay 也算一次 flush 状态同步：继续把同一段 tail
+replay 到 secondary checkpoint，sync secondary，roll 到新的 active WAL，
+并提交新的 manifest。
+
+graceful shutdown 是单独的收尾流程，不切换 primary，也不用 primary
+覆盖 secondary；如果 checkpoint 前进，secondary 仍然通过 WAL replay
+对齐 checkpoint：
+
+```text
+1. 拿 primary 写锁，阻塞 Put/Delete/Get。
+
+2. 如果当前 active WAL 为空，直接结束；没有新的 durable progress 要发布。
+
+3. 如果当前 active WAL 非空，或还没有合法 manifest：
+   seal active WAL，并创建新的空 active WAL。
+   旧 active WAL 不能删除；当前实现里 record position 仍可能指向它。
+
+4. 并发执行：
+   msync(primary index)
+   msync(刚 seal 的 WAL)
+
+5. 将 checkpoint 之后到刚 seal 的 WAL replay 到
+   secondary checkpoint index，sync 并关闭 secondary。best-effort 启动
+   恢复会在 replay 前 repair 待 replay WAL，删除坏 bytes；repair 后
+   checkpoint replay 仍然使用 strict。
+
+6. msync(new active WAL header)，确保 manifest 引用的新 active WAL 已存在。
+
+7. 原子提交 MANIFEST。
+```
 
 ## 10. Compaction
 
@@ -341,7 +344,7 @@ Compaction 不需要特殊 index replay 文件。
 - 如果 WAL 非空，先强制 checkpoint。
 - compaction 期间冻结写入，读继续服务。
 
-设当前 `writer_index = serving_index = B`。
+设当前读写都走 `primary_index`。
 
 正式流程：
 
@@ -353,7 +356,7 @@ Compaction 不需要特殊 index replay 文件。
 
 3. 选择 Parquet_X。
 
-4. 扫 writer_index，找出所有仍指向 Parquet_X 的 key。
+4. 扫 primary_index，找出所有仍指向 Parquet_X 的 key。
 
 5. 读取这些 key 的 value，写入 Parquet_Y。
    fsync(Parquet_Y)
@@ -389,26 +392,31 @@ ParquetSetChange record 已经 fsync 后，旧 Parquet 才能删除。
 1. 读取并校验 MANIFEST。
    失败则拒绝启动。
 
-2. 找 clean_index = manifest.active_index。
-   找 writable_index = 另一个 index。
+2. 如果 MANIFEST 存在：
+   检查 manifest active WAL 是否有 tail。
+   如果 tail 为空，直接打开 primary runtime index。
+   如果 tail 非空，复制 secondary checkpoint index 到 primary runtime index，
+   再 replay WAL tail。
 
-3. 重建 writable_index：
-   清空 writable_index。
-   遍历 clean_index 的 key/location，逻辑插入 writable_index。
-   msync(writable_index)
+3. 如果 MANIFEST 不存在：
+   清空 primary runtime index。
+   WAL 目录只能为空、只有 WAL segment 1，或 WAL segment 1 后跟一个
+   manifest 提交前 rollover 留下的空 segment 2。空 segment 2 启动时删除，
+   其他多 segment 状态拒绝启动。
+   从 WAL segment 1 replay。
 
-4. 从 manifest.replay_wal_id / replay_offset 开始 replay WAL：
+4. replay WAL：
    对每条 record：
-     校验 magic/version/len/CRC/seq。
+     校验 version/len/CRC。
      失败则截断当前 WAL 到失败 offset，停止 replay。
-     Put：更新 writable_index[key] = WAL(wal_id, offset, value_len)
-     Delete：移除 writable_index[key]
+     Put：更新 primary_index[key] = WAL(wal_id, offset, value_len)
+     Delete：移除 primary_index[key]
      ParquetSetChange：
-       从 writable_index 删除 removed parquets 的 entry
+       从 primary_index 删除 removed parquets 的 entry
        扫 added parquets，插入 Parquet location
        更新运行时 Parquet 元数据
 
-5. msync(writable_index)。
+5. 如果发生了 replay/rebuild，则 msync(primary runtime index)。
    只有这个步骤成功后，replay 后不再引用的 Parquet 才能被视为孤儿。
 
 6. 清理孤儿 Parquet：
@@ -417,16 +425,15 @@ ParquetSetChange record 已经 fsync 后，旧 Parquet 才能删除。
 7. 重建 runtime_live_entries：
    从 manifest.live_entries 开始。
    replay WAL 期间按覆盖/删除补 delta。
-   debug 模式下可全量扫 writable_index 校验。
+   debug 模式下可全量扫 primary_index 校验。
 
-8. writer_index = writable_index。
-   serving_index = writable_index。
+8. primary_index = primary runtime index。
    current_wal = 最后一个可追加 WAL segment。
    frozen = false。
    开服。
 ```
 
-启动恢复只信任 manifest 指向的 clean index。
+启动恢复只信任 manifest 指向的 secondary checkpoint 进度。
 
 另一个 index 不作为恢复依据，只能作为可写 index。
 使用它服务写入前，必须通过逻辑 replay 追平到 manifest 状态。
@@ -439,10 +446,9 @@ ParquetSetChange record 已经 fsync 后，旧 Parquet 才能删除。
 | WAL 写完但未 checkpoint | 已落盘前缀可能 replay，未落盘尾部可能丢失。 | 丢失未承诺持久化的数据。 |
 | Parquet 写一半 | 不在 manifest，启动清理。 | 无已承诺数据丢失。 |
 | Parquet 写完但 manifest 未提交 | 不在 manifest，启动清理；WAL 仍可 replay。 | 无已承诺数据丢失。 |
-| 新 clean candidate 已改，manifest 未提交 | manifest 未提交，启动按旧 clean index + WAL replay 恢复；candidate 不作为恢复依据。 | 无已承诺数据丢失。 |
-| manifest 已提交，另一个 index 未重建 | 启动信任 manifest 指向的新 clean index，从 clean index + WAL replay 重建另一个 index。 | 无已承诺数据丢失。 |
-| manifest 已提交，serving 未切换 | manifest 指向的新 index 已完整落盘，启动正常使用新 index。 | 无已承诺数据丢失。 |
-| serving 已切换，旧 WAL 未删除 | 启动按 manifest 从新 replay 起点开始，旧 WAL 可清理。 | 无影响。 |
+| secondary checkpoint 已改，manifest 未提交 | manifest 未提交，启动按旧 checkpoint + WAL tail 恢复；candidate 不作为恢复依据。 | 无已承诺数据丢失。 |
+| manifest 已提交且 WAL tail 为空 | 启动直接打开 primary runtime index。 | 无影响。 |
+| manifest 已提交且 WAL tail 非空 | 启动复制 secondary checkpoint 到 primary，再 replay WAL tail，sync primary，然后把 tail 同步到 secondary 并提交新 manifest。 | 无已承诺数据丢失。 |
 | compaction 删除旧 Parquet 前崩溃 | replay ParquetSetChange 后清理旧 Parquet。 | 无影响。 |
 | compaction 删除旧 Parquet 后崩溃 | replay ParquetSetChange 后不会再引用旧 Parquet。 | 无影响。 |
 | manifest 损坏 | 拒绝启动。 | 需要运维恢复。 |
@@ -452,17 +458,17 @@ ParquetSetChange record 已经 fsync 后，旧 Parquet 才能删除。
 
 实现必须满足：
 
-1. Manifest 指向的 `active_index` 必须完整、干净、可恢复。
+1. Manifest 指向的 secondary checkpoint 进度必须完整、干净、可恢复。
 2. Manifest 提交时引用的 Parquet 文件必须已经完整落盘。
 3. 启动清理 Parquet 必须在 WAL replay 和 index sync 成功之后执行，并以 replay 后的 Parquet 集合为准。
-4. Reader 只看 `serving_index`，不看 manifest。
+4. Reader 只看 `primary_index`，不看 manifest。
 5. 删除 WAL、Parquet、旧 index generation 前必须等待 reader epoch 结束。
 6. Compaction 开始时 WAL 必须为空。
 7. ParquetSetChange record 必须 fsync 后才能删除旧 Parquet。
 8. append WAL 成功但 index 更新失败时，引擎必须进入 fatal 状态并停止服务。
 9. replay 只接受连续、CRC 正确、seq 正确的 WAL 前缀。
-10. checkpoint 的提交顺序固定为：数据文件落盘、新 primary index 落盘、manifest 切换 active_index、重建另一个 index、serving 切换。
-11. 普通写入不能修改 Manifest 指向的 `active_index`。
+10. checkpoint 的提交顺序固定为：primary index 与 sealed WAL 落盘、secondary replay/sync/close、新 active WAL header 落盘、manifest 提交。
+11. 普通写入不能修改 Manifest 对应的 secondary checkpoint index。
 
 ## 14. 不支持的能力
 
@@ -485,8 +491,8 @@ ParquetSetChange record 已经 fsync 后，旧 Parquet 才能删除。
 | 写入模型 | 单 writer | 降低索引并发复杂度。 |
 | 读写并发 | checkpoint/compaction 冻结写，读继续 | 简单且读路径稳定。 |
 | WAL | segment | 避免单文件前缀回收导致 offset 语义复杂。 |
-| Index | A/B 双文件 | checkpoint 切换 primary index，另一个 index 可从 snapshot + WAL 重建。 |
-| A/B 追平 | 从 clean index + WAL replay 重建 | 避免 page-level 全量复制，也不需要额外 index delta。 |
+| Index | primary/secondary 双文件 | flush 不切 live index；secondary 只作为 checkpoint 产物。 |
+| checkpoint 追平 | secondary 从 manifest checkpoint + WAL replay 追平 | 避免 page-level 全量复制，也不需要额外 index delta。 |
 | Compaction | WAL 记录 ParquetSetChange | 用已有 replay 机制表达 `del k files, add j files`。 |
 | 删除旧文件 | reader epoch 后延迟删除 | 防止正在执行的 reader 访问已删除资源。 |
 | 持久性 | checkpoint 边界 | 明确写成功不等于已持久化。 |

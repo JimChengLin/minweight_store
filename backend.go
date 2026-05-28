@@ -21,7 +21,6 @@ type indexRecordStore interface {
 	Delete(key []byte) (minpatricia.Position, error)
 	Free(pos minpatricia.Position) error
 	Value(pos minpatricia.Position) ([]byte, bool)
-	Len() int
 	Sync() error
 	Close() error
 }

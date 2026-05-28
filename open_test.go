@@ -87,7 +87,7 @@ func TestOpenResetsPersistedIndexBeforeReplay(t *testing.T) {
 	}
 }
 
-func TestOpenCleanManifestSkipsReplay(t *testing.T) {
+func TestOpenGracefulShutdownSkipsReplay(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})
 	if err != nil {
@@ -102,13 +102,36 @@ func TestOpenCleanManifestSkipsReplay(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, manifestName)); err != nil {
 		t.Fatal(err)
 	}
+	state, hasLegalManifest, err := (&manifest{path: filepath.Join(dir, manifestName)}).read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasLegalManifest {
+		t.Fatal("manifest is missing after graceful shutdown")
+	}
+	if state.checkpointWALFileNo != firstWALSegmentNo || state.activeWALFileNo != firstWALSegmentNo+1 {
+		t.Fatalf("manifest state = %+v, want checkpoint=%d active=%d", state, firstWALSegmentNo, firstWALSegmentNo+1)
+	}
+	cleanWAL, err := openMmapWALRecordStore(filepath.Join(walSegmentsPath(dir), walSegmentName(firstWALSegmentNo+1)), 1<<20, firstWALSegmentNo+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanWAL.used != walHeaderSize {
+		t.Fatalf("clean WAL used = %d, want %d", cleanWAL.used, walHeaderSize)
+	}
+	if err := cleanWAL.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	wal, err := openMmapWALRecordStore(filepath.Join(dir, "wal"), 1<<20)
+	wal, err := openMmapWALRecordStore(filepath.Join(walSegmentsPath(dir), walSegmentName(firstWALSegmentNo)), 1<<20, firstWALSegmentNo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wal.data[walHeaderSize+walRecordCRCOffset] ^= 0xff
 	if err := wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(secondaryIndexPath(dir)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,8 +141,8 @@ func TestOpenCleanManifestSkipsReplay(t *testing.T) {
 	}
 	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
-	if _, err := os.Stat(filepath.Join(dir, manifestName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("manifest after Open err = %v, want not exist", err)
+	if _, err := os.Stat(filepath.Join(dir, manifestName)); err != nil {
+		t.Fatalf("manifest after Open err = %v, want exists", err)
 	}
 }
 
@@ -144,6 +167,7 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := store.backend
+	store.records = nil
 	store.backend = nil
 	if err := backend.syncAndClose(); err != nil {
 		t.Fatal(err)
@@ -156,12 +180,32 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
 	assertGet(t, store, "bravo", "two")
+	if store.checkpointWALFileNo != firstWALSegmentNo+1 {
+		t.Fatalf("checkpoint WAL file no = %d, want %d", store.checkpointWALFileNo, firstWALSegmentNo+1)
+	}
+	if store.records.activeFileNo != firstWALSegmentNo+2 {
+		t.Fatalf("active WAL file no = %d, want %d", store.records.activeFileNo, firstWALSegmentNo+2)
+	}
+
+	state, hasLegalManifest, err := store.manifest.read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasLegalManifest {
+		t.Fatal("manifest is missing after startup checkpoint")
+	}
+	if state.checkpointWALFileNo != firstWALSegmentNo+1 || state.activeWALFileNo != firstWALSegmentNo+2 {
+		t.Fatalf("manifest state = %+v, want checkpoint=%d active=%d", state, firstWALSegmentNo+1, firstWALSegmentNo+2)
+	}
 }
 
 func TestOpenRejectsCorruptManifest(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -173,7 +217,7 @@ func TestOpenRejectsCorruptManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data[manifestWALUsedOffset] ^= 0xff
+	data[manifestActiveWALNoOffset] ^= 0xff
 	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -184,8 +228,35 @@ func TestOpenRejectsCorruptManifest(t *testing.T) {
 	}
 }
 
+func TestOpenExplicitWALSizeDoesNotRejectDifferentManifestSize(t *testing.T) {
+	dir := t.TempDir()
+	oldSize := int64(walHeaderSize + walRecordHeaderSize + len("alpha") + len("one"))
+	store, err := Open(dir, Options{WALSize: oldSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	newSize := oldSize + 128
+	store, err = Open(dir, Options{WALSize: newSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	if store.records.size != newSize {
+		t.Fatalf("WALSize = %d, want explicit %d", store.records.size, newSize)
+	}
+	assertGet(t, store, "alpha", "one")
+}
+
 func TestWALRecordCRC(t *testing.T) {
-	wal, err := openMmapWALRecordStore(filepath.Join(t.TempDir(), "wal"), 1<<20)
+	wal, err := openMmapWALRecordStore(filepath.Join(t.TempDir(), walSegmentName(firstWALSegmentNo)), 1<<20, firstWALSegmentNo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +266,7 @@ func TestWALRecordCRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wal.data[uint64(pos)+walRecordHeaderSize] ^= 0xff
+	wal.data[recordPositionOffset(pos)+walRecordHeaderSize] ^= 0xff
 	err = wal.Replay(WALReplayStrict, func(op byte, key []byte, pos minpatricia.Position) error {
 		return nil
 	})
@@ -227,13 +298,105 @@ func TestOpenPointInTimeTruncatesCorruptWAL(t *testing.T) {
 	assertMissing(t, store, "bravo")
 	assertMissing(t, store, "charlie")
 
-	wal := store.wal
-	if wal.used != uint64(corruptPos) {
-		t.Fatalf("wal used = %d, want %d", wal.used, corruptPos)
+	wal := store.records.activeSegment()
+	if wal.used != recordPositionOffset(corruptPos) {
+		t.Fatalf("wal used = %d, want %d", wal.used, recordPositionOffset(corruptPos))
 	}
 }
 
-func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
+func TestOpenRejectsNoManifestMultipleWALSegments(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	walDir := walSegmentsPath(dir)
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wal1, err := openMmapWALRecordStore(filepath.Join(walDir, walSegmentName(1)), walSize, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal1.Append([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	corruptPos, err := wal1.Append([]byte("bravo"), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal1.data[recordPositionOffset(corruptPos)+walRecordHeaderSize] ^= 0xff
+	if err := wal1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wal2, err := openMmapWALRecordStore(filepath.Join(walDir, walSegmentName(2)), walSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal2.Append([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{
+		WALSize:         walSize,
+		WALReplayPolicy: WALReplayPointInTime,
+	})
+	if !errors.Is(err, ErrManifest) {
+		t.Fatalf("Open err = %v, want %v", err, ErrManifest)
+	}
+}
+
+func TestOpenNoManifestDropsEmptyRolloverWAL(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	walDir := walSegmentsPath(dir)
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wal1, err := openMmapWALRecordStore(filepath.Join(walDir, walSegmentName(1)), walSize, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal1.Append([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wal2, err := openMmapWALRecordStore(filepath.Join(walDir, walSegmentName(2)), walSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal2.used != walHeaderSize {
+		t.Fatalf("wal2 used = %d, want %d", wal2.used, walHeaderSize)
+	}
+	if err := wal2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	assertGet(t, store, "alpha", "one")
+	if store.records.activeFileNo != firstWALSegmentNo {
+		t.Fatalf("active WAL file no = %d, want %d", store.records.activeFileNo, firstWALSegmentNo)
+	}
+	if store.records.nextFileNo != firstWALSegmentNo+1 {
+		t.Fatalf("next WAL file no = %d, want %d", store.records.nextFileNo, firstWALSegmentNo+1)
+	}
+	if _, err := os.Stat(filepath.Join(walDir, walSegmentName(2))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty rollover WAL stat err = %v, want %v", err, os.ErrNotExist)
+	}
+}
+
+func TestOpenBestEffortRepairsCorruptWALRecord(t *testing.T) {
 	dir, walSize, _, used := corruptMiddleWAL(t)
 	store, err := Open(dir, Options{
 		WALSize:         walSize,
@@ -242,16 +405,47 @@ func TestOpenBestEffortSkipsCorruptWALRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeForTest(t, store)
 
 	assertGet(t, store, "alpha", "one")
 	assertMissing(t, store, "bravo")
 	assertGet(t, store, "charlie", "three")
 
-	wal := store.wal
-	if wal.used != used {
-		t.Fatalf("wal used = %d, want unchanged %d", wal.used, used)
+	wal := store.records.activeSegment()
+	if wal.used >= used {
+		t.Fatalf("wal used = %d, want best-effort repair below old used %d", wal.used, used)
 	}
+	if err := wal.Replay(WALReplayStrict, func(op byte, key []byte, pos minpatricia.Position) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("strict replay after best-effort repair err = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
+		t.Fatal(err)
+	}
+	backend := store.backend
+	store.records = nil
+	store.backend = nil
+	if err := backend.syncAndClose(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertMissing(t, store, "bravo")
+	assertGet(t, store, "charlie", "three")
+	assertGet(t, store, "delta", "four")
 }
 
 func TestOpenRejectsInvalidWALReplayPolicy(t *testing.T) {
@@ -267,6 +461,13 @@ func TestOpenRejectsInvalidWALReplayPolicy(t *testing.T) {
 	_, err = Open(dir, Options{WALSize: 1 << 20, WALReplayPolicy: WALReplayPolicy(99)})
 	if !errors.Is(err, ErrReplayPolicy) {
 		t.Fatalf("Open err = %v, want %v", err, ErrReplayPolicy)
+	}
+}
+
+func TestOpenRejectsWALSizeLargerThanRecordOffsetLimit(t *testing.T) {
+	_, err := Open(t.TempDir(), Options{WALSize: int64(recordOffsetLimit) + 1})
+	if !errors.Is(err, ErrWalFull) {
+		t.Fatalf("Open err = %v, want %v", err, ErrWalFull)
 	}
 }
 
@@ -290,7 +491,7 @@ func TestInvalidKeyDoesNotAdvanceWAL(t *testing.T) {
 	}
 	defer closeForTest(t, store)
 
-	wal := store.wal
+	wal := store.records.activeSegment()
 	used := wal.used
 	key := make([]byte, minpatricia.MaxKeySize+1)
 	err = store.Put(key, []byte("value"))
@@ -307,7 +508,11 @@ func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64
 
 	const walSize = int64(1 << 20)
 	dir := t.TempDir()
-	wal, err := openMmapWALRecordStore(filepath.Join(dir, "wal"), walSize)
+	walDir := walSegmentsPath(dir)
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := openMmapWALRecordStore(filepath.Join(walDir, walSegmentName(firstWALSegmentNo)), walSize, firstWALSegmentNo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +526,7 @@ func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64
 	if _, err := wal.Append([]byte("charlie"), []byte("three")); err != nil {
 		t.Fatal(err)
 	}
-	wal.data[uint64(corruptPos)+walRecordHeaderSize] ^= 0xff
+	wal.data[recordPositionOffset(corruptPos)+walRecordHeaderSize] ^= 0xff
 	used := wal.used
 	if err := wal.Close(); err != nil {
 		t.Fatal(err)
