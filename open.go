@@ -47,6 +47,11 @@ func Open(dir string, options ...Options) (*Store, error) {
 		if !customWALSize {
 			cfg.WALSize = int64(state.walSegmentSize)
 		}
+		if !state.primaryWALFlushed {
+			if err := dropEmptyRolloverWAL(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextWALFileNo); err != nil {
+				return nil, err
+			}
+		}
 		records, err := openSegmentedRecordStore(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextWALFileNo)
 		if err != nil {
 			return nil, err
@@ -77,6 +82,9 @@ type openedStoreParts struct {
 }
 
 func openFromManifest(dir string, manifest *manifest, records *segmentedRecordStore, state manifestState, policy WALReplayPolicy) (openedStoreParts, error) {
+	if state.primaryWALFlushed {
+		return recoverPrimaryFlushedCheckpoint(dir, manifest, records, state)
+	}
 	active := records.activeSegment()
 	if active.used == walHeaderSize {
 		return openCleanManifest(dir, records, state.checkpointWALFileNo)
@@ -135,6 +143,39 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 		backend:             backend,
 		records:             records,
 		checkpointWALFileNo: checkpointWALFileNo,
+	}, nil
+}
+
+func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *segmentedRecordStore, state manifestState) (openedStoreParts, error) {
+	active := records.activeSegment()
+	if active.used != walHeaderSize {
+		return openedStoreParts{}, ErrManifest
+	}
+	if err := requireMmapNodeStoreDir(primaryIndexPath(dir)); err != nil {
+		return openedStoreParts{}, err
+	}
+	nodes, err := openMmapNodeStore(primaryIndexPath(dir))
+	if err != nil {
+		return openedStoreParts{}, err
+	}
+	backend, err := openIndexBackend(records, nodes)
+	if err != nil {
+		_ = nodes.Close()
+		return openedStoreParts{}, err
+	}
+	if err := copyMmapNodeStoreDir(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
+		_ = nodes.Close()
+		return openedStoreParts{}, err
+	}
+	state.primaryWALFlushed = false
+	if err := manifest.write(state); err != nil {
+		_ = nodes.Close()
+		return openedStoreParts{}, err
+	}
+	return openedStoreParts{
+		backend:             backend,
+		records:             records,
+		checkpointWALFileNo: state.checkpointWALFileNo,
 	}, nil
 }
 
@@ -221,6 +262,27 @@ func walSegmentEmpty(dir string, walSize int64, fileNo uint64) (bool, error) {
 	}
 	defer wal.Close()
 	return wal.used == walHeaderSize, nil
+}
+
+func dropEmptyRolloverWAL(dir string, walSize int64, activeFileNo, nextFileNo uint64) error {
+	ids, err := listWALSegmentIDs(dir)
+	if err != nil {
+		return err
+	}
+	if len(ids) < 2 || ids[len(ids)-2] != activeFileNo || ids[len(ids)-1] != nextFileNo {
+		return nil
+	}
+	empty, err := walSegmentEmpty(dir, walSize, nextFileNo)
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return ErrManifest
+	}
+	if err := os.Remove(filepath.Join(dir, walSegmentName(nextFileNo))); err != nil {
+		return err
+	}
+	return syncDir(dir)
 }
 
 func prepareWALForReplay(records *segmentedRecordStore, fileNo uint64, policy WALReplayPolicy) (WALReplayPolicy, error) {

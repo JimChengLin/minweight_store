@@ -10,15 +10,16 @@ import (
 
 const (
 	manifestName           = "MANIFEST"
-	manifestVersion uint32 = 2
-	manifestSize           = 40
+	manifestVersion uint32 = 3
+	manifestSize           = 44
 
-	manifestVersionOffset         = 0
-	manifestCheckpointWALNoOffset = 4
-	manifestActiveWALNoOffset     = 12
-	manifestNextWALNoOffset       = 20
-	manifestWALSegmentSizeOffset  = 28
-	manifestCRCOffset             = 36
+	manifestVersionOffset           = 0
+	manifestCheckpointWALNoOffset   = 4
+	manifestActiveWALNoOffset       = 12
+	manifestNextWALNoOffset         = 20
+	manifestWALSegmentSizeOffset    = 28
+	manifestPrimaryWALFlushedOffset = 36
+	manifestCRCOffset               = 40
 )
 
 type manifest struct {
@@ -29,7 +30,9 @@ type manifest struct {
 //
 // The complete on-disk manifest is:
 //
-//	version || manifestState fields || crc32(version || manifestState fields)
+//	version || checkpoint_wal_file_no || active_wal_file_no ||
+//	next_wal_file_no || wal_segment_size || primary_wal_flushed ||
+//	crc32(all previous bytes)
 //
 // It is not mutable in-memory store state. Code builds a fresh manifestState
 // when checkpoint progress changes, then writes that payload with the current
@@ -39,6 +42,7 @@ type manifestState struct {
 	activeWALFileNo     uint64
 	nextWALFileNo       uint64
 	walSegmentSize      uint64
+	primaryWALFlushed   bool
 }
 
 func (m *manifest) read() (manifestState, bool, error) {
@@ -79,6 +83,11 @@ func readManifest(path string) (manifestState, bool, error) {
 		nextWALFileNo:       binary.LittleEndian.Uint64(data[manifestNextWALNoOffset : manifestNextWALNoOffset+8]),
 		walSegmentSize:      binary.LittleEndian.Uint64(data[manifestWALSegmentSizeOffset : manifestWALSegmentSizeOffset+8]),
 	}
+	primaryWALFlushed := binary.LittleEndian.Uint32(data[manifestPrimaryWALFlushedOffset : manifestPrimaryWALFlushedOffset+4])
+	if primaryWALFlushed > 1 {
+		return manifestState{}, false, ErrManifest
+	}
+	state.primaryWALFlushed = primaryWALFlushed == 1
 	if err := validateManifestState(state); err != nil {
 		return manifestState{}, false, err
 	}
@@ -97,6 +106,9 @@ func writeManifest(path string, state manifestState) error {
 	binary.LittleEndian.PutUint64(data[manifestActiveWALNoOffset:manifestActiveWALNoOffset+8], state.activeWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestNextWALNoOffset:manifestNextWALNoOffset+8], state.nextWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestWALSegmentSizeOffset:manifestWALSegmentSizeOffset+8], state.walSegmentSize)
+	if state.primaryWALFlushed {
+		binary.LittleEndian.PutUint32(data[manifestPrimaryWALFlushedOffset:manifestPrimaryWALFlushedOffset+4], 1)
+	}
 	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], crc32.ChecksumIEEE(data[:manifestCRCOffset]))
 
 	tmp := path + ".tmp"

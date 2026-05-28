@@ -1,7 +1,7 @@
 # minweight_store
 
-`minweight_store` is a small single-node KV store evolving toward the design in
-`DESIGN.md`.
+`minweight_store` is a small single-node ordered KV store evolving toward the
+storage design captured in `AGENTS.md`.
 
 Current V0 is an in-memory ordered KV store backed by
 [`minpatricia`](https://github.com/JimChengLin/minpatricia).

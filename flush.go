@@ -59,6 +59,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 		activeWALFileNo:     records.activeFileNo,
 		nextWALFileNo:       records.nextFileNo,
 		walSegmentSize:      uint64(records.size),
+		primaryWALFlushed:   true,
 	}
 	activeSync := make(chan error, 1)
 	go func() {
@@ -69,11 +70,14 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 		<-activeSync
 		return 0, err
 	}
-	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy); err != nil {
-		<-activeSync
+	if err := <-activeSync; err != nil {
 		return 0, err
 	}
-	if err := <-activeSync; err != nil {
+	if err := manifest.write(state); err != nil {
+		return 0, err
+	}
+	state.primaryWALFlushed = false
+	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy); err != nil {
 		return 0, err
 	}
 	if err := manifest.write(state); err != nil {

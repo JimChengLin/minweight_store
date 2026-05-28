@@ -199,6 +199,158 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 	}
 }
 
+func TestOpenLegalManifestDropsEmptyRolloverWAL(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	wal3, err := openMmapWALRecordStore(filepath.Join(walSegmentsPath(dir), walSegmentName(firstWALSegmentNo+2)), walSize, firstWALSegmentNo+2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal3.used != walHeaderSize {
+		t.Fatalf("wal3 used = %d, want %d", wal3.used, walHeaderSize)
+	}
+	if err := wal3.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	if store.checkpointWALFileNo != firstWALSegmentNo+1 {
+		t.Fatalf("checkpoint WAL file no = %d, want %d", store.checkpointWALFileNo, firstWALSegmentNo+1)
+	}
+	if store.records.activeFileNo != firstWALSegmentNo+2 {
+		t.Fatalf("active WAL file no = %d, want %d", store.records.activeFileNo, firstWALSegmentNo+2)
+	}
+}
+
+func TestOpenPrimaryWALFlushedManifestTrustsPrimary(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	simulatePrimaryWALFlushedCheckpointForTest(t, store)
+	if err := os.RemoveAll(secondaryIndexPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	state, hasLegalManifest, err := store.manifest.read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasLegalManifest {
+		t.Fatal("manifest is missing after primary-flushed recovery")
+	}
+	if state.primaryWALFlushed {
+		t.Fatal("primaryWALFlushed = true, want false")
+	}
+	if state.checkpointWALFileNo != firstWALSegmentNo+1 || state.activeWALFileNo != firstWALSegmentNo+2 {
+		t.Fatalf("manifest state = %+v, want checkpoint=%d active=%d", state, firstWALSegmentNo+1, firstWALSegmentNo+2)
+	}
+
+	if err := store.Put([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	assertGet(t, store, "charlie", "three")
+}
+
+func TestOpenPrimaryWALFlushedManifestAfterSecondaryReplayTrustsPrimary(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t, store)
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	state, hasLegalManifest, err := store.manifest.read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasLegalManifest {
+		t.Fatal("manifest is missing after primary-flushed recovery")
+	}
+	if state.primaryWALFlushed {
+		t.Fatal("primaryWALFlushed = true, want false")
+	}
+}
+
 func TestOpenRejectsCorruptManifest(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})
@@ -532,6 +684,76 @@ func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64
 		t.Fatal(err)
 	}
 	return dir, walSize, corruptPos, used
+}
+
+func dirtySyncAndCloseStoreForTest(t *testing.T, store *Store) {
+	t.Helper()
+
+	backend := store.backend
+	store.records = nil
+	store.backend = nil
+	if err := backend.syncAndClose(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
+	t.Helper()
+
+	oldWALFileNo := store.records.activeFileNo
+	oldWAL, err := store.records.Rollover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := store.records.activeSegment()
+	if err := syncPrimaryIndexAndWAL(store.backend, oldWAL); err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	state := manifestState{
+		checkpointWALFileNo: oldWALFileNo,
+		activeWALFileNo:     store.records.activeFileNo,
+		nextWALFileNo:       store.records.nextFileNo,
+		walSegmentSize:      uint64(store.records.size),
+		primaryWALFlushed:   true,
+	}
+	if err := store.manifest.write(state); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+}
+
+func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, store *Store) {
+	t.Helper()
+
+	oldWALFileNo := store.records.activeFileNo
+	oldWAL, err := store.records.Rollover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := store.records.activeSegment()
+	if err := syncPrimaryIndexAndWAL(store.backend, oldWAL); err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	state := manifestState{
+		checkpointWALFileNo: oldWALFileNo,
+		activeWALFileNo:     store.records.activeFileNo,
+		nextWALFileNo:       store.records.nextFileNo,
+		walSegmentSize:      uint64(store.records.size),
+		primaryWALFlushed:   true,
+	}
+	if err := store.manifest.write(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointSecondaryIndex(store.manifest.dir(), store.records, oldWALFileNo, WALReplayStrict); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
 }
 
 func assertGet(t *testing.T, store *Store, key, want string) {
