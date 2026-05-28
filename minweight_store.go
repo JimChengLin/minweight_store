@@ -206,10 +206,13 @@ func (s *Store) Close() error {
 	}
 
 	firstErr := s.fatal
+	synced := false
 	if firstErr == nil {
 		if err := s.closeCheckpointWithPrimaryLocked(); err != nil {
 			firstErr = errors.Join(ErrFatal, err)
 			s.fatal = firstErr
+		} else {
+			synced = true
 		}
 	}
 
@@ -219,8 +222,14 @@ func (s *Store) Close() error {
 	s.records = nil
 	s.primaryMu.Unlock()
 
-	if err := backend.close(); err != nil {
-		firstErr = errors.Join(firstErr, err)
+	var closeErr error
+	if synced {
+		closeErr = backend.closeAfterSync()
+	} else {
+		closeErr = backend.close()
+	}
+	if closeErr != nil {
+		firstErr = errors.Join(firstErr, closeErr)
 	}
 	return firstErr
 }

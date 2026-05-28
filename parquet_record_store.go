@@ -271,6 +271,10 @@ func (s *parquetRecordStore) Close() error {
 	return firstErr
 }
 
+func (s *parquetRecordStore) closeAfterSync() error {
+	return s.Close()
+}
+
 func (s *parquetRecordStore) recordLocation(pos minpatricia.Position) (int, int64, bool) {
 	rowGroup, row, ok := parseParquetRecordPosition(pos)
 	if !ok || rowGroup >= uint64(len(s.rowGroups)) {

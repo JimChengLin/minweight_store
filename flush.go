@@ -179,7 +179,7 @@ func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFile
 	if err := nodes.Sync(); err != nil {
 		return err
 	}
-	if err := nodes.Close(); err != nil {
+	if err := nodes.closeAfterSync(); err != nil {
 		return err
 	}
 	closeNodes = false

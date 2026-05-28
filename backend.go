@@ -23,12 +23,14 @@ type indexRecordStore interface {
 	Value(pos minpatricia.Position) ([]byte, bool)
 	Sync() error
 	Close() error
+	closeAfterSync() error
 }
 
 type indexNodeStore interface {
 	minpatricia.NodeStore
 	Sync() error
 	Close() error
+	closeAfterSync() error
 }
 
 type backendMutationResult uint8
@@ -93,7 +95,24 @@ func (b *indexBackend) close() error {
 
 func (b *indexBackend) syncAndClose() error {
 	firstErr := b.sync()
-	if err := b.close(); err != nil && firstErr == nil {
+	var err error
+	if firstErr == nil {
+		err = b.closeAfterSync()
+	} else {
+		err = b.close()
+	}
+	if err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+func (b *indexBackend) closeAfterSync() error {
+	var firstErr error
+	if err := b.nodes.closeAfterSync(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := b.records.closeAfterSync(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
@@ -141,15 +160,22 @@ func (b *indexBackend) delete(key []byte) (bool, backendMutationResult, error) {
 	if len(key) > minpatricia.MaxKeySize {
 		return false, backendMutationNotAccepted, minpatricia.ErrKeyTooLarge
 	}
+	pos, ok, err := b.index.Get(key)
+	if err != nil {
+		return false, backendMutationAcceptedThenFailed, err
+	}
+	if !ok {
+		return false, backendMutationApplied, nil
+	}
 	if _, err := b.records.Delete(key); err != nil {
 		return false, backendMutationNotAccepted, err
 	}
-	pos, deleted, err := b.index.Delete(key)
-	if err != nil || !deleted {
-		if err != nil {
-			return deleted, backendMutationAcceptedThenFailed, err
-		}
-		return false, backendMutationApplied, nil
+	deletedPos, deleted, err := b.index.Delete(key)
+	if err != nil {
+		return deleted, backendMutationAcceptedThenFailed, err
+	}
+	if !deleted || deletedPos != pos {
+		return false, backendMutationAcceptedThenFailed, ErrCorruptIndex
 	}
 	if err := b.records.Free(pos); err != nil {
 		return true, backendMutationAcceptedThenFailed, err

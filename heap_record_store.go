@@ -88,6 +88,10 @@ func (s *heapRecordStore) Close() error {
 	return nil
 }
 
+func (s *heapRecordStore) closeAfterSync() error {
+	return s.Close()
+}
+
 func cloneRecordKey(key []byte) []byte {
 	if key == nil {
 		return []byte{}

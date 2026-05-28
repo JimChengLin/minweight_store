@@ -284,6 +284,23 @@ func (s *mmapWALRecordStore) Close() error {
 	return firstErr
 }
 
+func (s *mmapWALRecordStore) closeAfterSync() error {
+	var firstErr error
+	if s.data != nil {
+		if err := syscall.Munmap(s.data); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.data = nil
+	}
+	if s.file != nil {
+		if err := s.file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.file = nil
+	}
+	return firstErr
+}
+
 func (s *mmapWALRecordStore) appendRecord(op byte, key, value []byte) (minpatricia.Position, error) {
 	if s.sealed {
 		return 0, ErrWalSealed

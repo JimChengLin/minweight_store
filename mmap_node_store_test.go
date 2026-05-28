@@ -4,6 +4,7 @@ package minweight_store
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -181,6 +182,107 @@ func TestMmapNodeStoreReopen(t *testing.T) {
 	}
 }
 
+func TestMmapNodeStoreSparseCopySkipsUnusedPages(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	nodes, err := openMmapNodeStore(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, page, err := nodes.Alloc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(mmapNodePageBytes(page)[321:], []byte("used page marker"))
+	if err := nodes.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := nodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srcExtent := filepath.Join(src, mmapNodeExtentName(0))
+	unusedOffset := mmapNodeTestPageOffset(10, 123)
+	flipFileByte(t, srcExtent, unusedOffset)
+
+	dstExtent := filepath.Join(dst, mmapNodeExtentName(0))
+	if err := copyMmapNodeExtentFileSparse(srcExtent, dstExtent); err != nil {
+		t.Fatal(err)
+	}
+	got := readFileBytes(t, dstExtent, mmapNodeTestPageOffset(id, 321), len("used page marker"))
+	if string(got) != "used page marker" {
+		t.Fatalf("copied used page marker = %q, want %q", got, "used page marker")
+	}
+	unused := readFileBytes(t, dstExtent, unusedOffset, 1)
+	if unused[0] != 0 {
+		t.Fatalf("copied unused page byte = 0x%x, want 0", unused[0])
+	}
+}
+
+func TestCopyMmapNodeStoreDirPreservesDestinationDir(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	srcNodes, err := openMmapNodeStore(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, page, err := srcNodes.Alloc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(mmapNodePageBytes(page)[321:], []byte("source marker"))
+	if err := srcNodes.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := srcNodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dstNodes, err := openMmapNodeStore(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dstNodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+	staleExtent, err := createMmapNodeExtent(dst, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleExtent.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, mmapNodeExtentName(0)+mmapNodeExtentCopyTempSuffix), []byte("stale temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyMmapNodeStoreDir(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("copyMmapNodeStoreDir replaced destination directory")
+	}
+	if _, err := os.Stat(filepath.Join(dst, mmapNodeExtentName(1))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale extent stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, mmapNodeExtentName(0)+mmapNodeExtentCopyTempSuffix)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale temp stat err = %v, want not exist", err)
+	}
+	got := readFileBytes(t, filepath.Join(dst, mmapNodeExtentName(0)), mmapNodeTestPageOffset(id, 321), len("source marker"))
+	if string(got) != "source marker" {
+		t.Fatalf("copied marker = %q, want source marker", got)
+	}
+}
+
 func TestMmapNodeStoreReleasesLaterFreeExtents(t *testing.T) {
 	dir := t.TempDir()
 	nodes, err := openMmapNodeStore(dir)
@@ -328,4 +430,50 @@ func TestMmapNodeStorePersistsIndex(t *testing.T) {
 		want = append(want, key+"="+value)
 	}
 	assertItems(t, "reopened mmap index Scan", reopened.scan, want)
+}
+
+func mmapNodeTestPageOffset(id uint64, off int64) int64 {
+	slot := id % mmapNodeSlotsPerExtent
+	return int64(mmapNodeReservedPages+slot)*mmapNodePageSize + off
+}
+
+func flipFileByte(t *testing.T, path string, offset int64) {
+	t.Helper()
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := file.ReadAt(b[:], offset); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	b[0] ^= 0xff
+	if _, err := file.WriteAt(b[:], offset); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFileBytes(t *testing.T, path string, offset int64, n int) []byte {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	buf := make([]byte, n)
+	if _, err := file.ReadAt(buf, offset); err != nil {
+		t.Fatal(err)
+	}
+	return buf
 }

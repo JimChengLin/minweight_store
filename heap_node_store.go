@@ -69,3 +69,7 @@ func (s *heapNodeStore) Sync() error {
 func (s *heapNodeStore) Close() error {
 	return nil
 }
+
+func (s *heapNodeStore) closeAfterSync() error {
+	return s.Close()
+}

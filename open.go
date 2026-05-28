@@ -3,8 +3,6 @@
 package minweight_store
 
 import (
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -118,7 +116,7 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 	if err != nil {
 		return openedStoreParts{}, err
 	}
-	if err := copyMmapNodeStoreDir(secondaryIndexPath(dir), primaryIndexPath(dir)); err != nil {
+	if err := copyMmapNodeStoreDirIfDifferent(secondaryIndexPath(dir), primaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
 	nodes, err := openMmapNodeStore(primaryIndexPath(dir))
@@ -163,7 +161,7 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
-	if err := copyMmapNodeStoreDir(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
+	if err := copyMmapNodeStoreDirIfDifferent(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
 		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
@@ -199,9 +197,8 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 		if err := os.Remove(filepath.Join(walDir, walSegmentName(ids[1]))); err != nil {
 			return openedStoreParts{}, err
 		}
-		if err := syncDir(walDir); err != nil {
-			return openedStoreParts{}, err
-		}
+		// This startup cleanup is idempotent; if the unlink is lost in a crash,
+		// the next Open will validate and remove the same empty segment again.
 		ids = ids[:1]
 	}
 	if len(ids) > 1 || len(ids) == 1 && ids[0] != firstWALSegmentNo {
@@ -282,7 +279,8 @@ func dropEmptyRolloverWAL(dir string, walSize int64, activeFileNo, nextFileNo ui
 	if err := os.Remove(filepath.Join(dir, walSegmentName(nextFileNo))); err != nil {
 		return err
 	}
-	return syncDir(dir)
+	// This cleanup is idempotent; durability is not checkpoint progress.
+	return nil
 }
 
 func prepareWALForReplay(records *segmentedRecordStore, fileNo uint64, policy WALReplayPolicy) (WALReplayPolicy, error) {
@@ -320,72 +318,4 @@ func secondaryIndexPath(dir string) string {
 
 func walSegmentsPath(dir string) string {
 	return filepath.Join(dir, walDirName)
-}
-
-func copyMmapNodeStoreDir(src, dst string) error {
-	if err := os.RemoveAll(dst); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return ErrManifest
-		}
-		if err := copyFile(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return syncDir(dst)
-}
-
-func requireMmapNodeStoreDir(path string) error {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return ErrManifest
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return ErrManifest
-	}
-	return nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	copyComplete := false
-	defer func() {
-		if !copyComplete {
-			_ = out.Close()
-			_ = os.Remove(dst)
-		}
-	}()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	copyComplete = true
-	return nil
 }

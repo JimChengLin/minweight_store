@@ -3,6 +3,7 @@ package minweight_store
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/JimChengLin/minpatricia"
@@ -51,6 +52,61 @@ func TestPutGetDelete(t *testing.T) {
 	_, ok, err = store.Get([]byte("alpha"))
 	if err != nil || ok {
 		t.Fatalf("Get(alpha) after delete ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+func TestDeleteMissingDoesNotWriteTombstone(t *testing.T) {
+	records := &deleteCountingRecordStore{
+		heapRecordStore: newHeapRecordStore(),
+	}
+	store := &Store{
+		backend: newIndexBackendWithNodes(records, newHeapNodeStore()),
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := store.Delete([]byte("bravo"))
+	if err != nil || deleted {
+		t.Fatalf("Delete(bravo) = (%v,%v), want false,nil", deleted, err)
+	}
+	if records.deletes != 0 {
+		t.Fatalf("record deletes after missing key = %d, want 0", records.deletes)
+	}
+
+	deleted, err = store.Delete([]byte("alpha"))
+	if err != nil || !deleted {
+		t.Fatalf("Delete(alpha) = (%v,%v), want true,nil", deleted, err)
+	}
+	if records.deletes != 1 {
+		t.Fatalf("record deletes after existing key = %d, want 1", records.deletes)
+	}
+}
+
+func TestDeleteMissingDoesNotFlushFullWAL(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("alpha")
+	value := []byte("one")
+	walSize := int64(walHeaderSize + walRecordHeaderSize + len(key) + len(value))
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	if err := store.Put(key, value); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.Delete([]byte("bravo"))
+	if err != nil || deleted {
+		t.Fatalf("Delete(bravo) = (%v,%v), want false,nil", deleted, err)
+	}
+	entries, err := os.ReadDir(walSegmentsPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("wal segments after missing delete = %d, want 1", len(entries))
 	}
 }
 
@@ -300,4 +356,14 @@ type appendErrorRecordStore struct {
 
 func (s *appendErrorRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
 	return 0, s.err
+}
+
+type deleteCountingRecordStore struct {
+	*heapRecordStore
+	deletes int
+}
+
+func (s *deleteCountingRecordStore) Delete(key []byte) (minpatricia.Position, error) {
+	s.deletes++
+	return s.heapRecordStore.Delete(key)
 }

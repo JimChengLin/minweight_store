@@ -150,6 +150,22 @@ func (s *segmentedRecordStore) Close() error {
 	return firstErr
 }
 
+func (s *segmentedRecordStore) closeAfterSync() error {
+	var firstErr error
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, segment := range s.segments {
+		if err := segment.closeAfterSync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	s.segments = nil
+	s.activeFileNo = 0
+	s.nextFileNo = 0
+	return firstErr
+}
+
 func (s *segmentedRecordStore) Rollover() (*mmapWALRecordStore, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/JimChengLin/minpatricia v0.0.0-20260526075748-1941606a5ac1
 	github.com/parquet-go/parquet-go v0.30.1
+	golang.org/x/sys v0.38.0
 )
 
 require (
@@ -15,6 +16,5 @@ require (
 	github.com/parquet-go/jsonlite v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/twpayne/go-geom v1.6.1 // indirect
-	golang.org/x/sys v0.38.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )

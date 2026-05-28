@@ -229,6 +229,20 @@ func (s *mmapNodeStore) Close() error {
 	return firstErr
 }
 
+func (s *mmapNodeStore) closeAfterSync() error {
+	var firstErr error
+	for _, extent := range s.extents {
+		if extent == nil {
+			continue
+		}
+		if err := extent.closeAfterSync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	s.extents = nil
+	return firstErr
+}
+
 func (s *mmapNodeStore) Reset() error {
 	if len(s.extents) == 0 || s.extents[0] == nil {
 		return minpatricia.ErrCorruptLayout
@@ -573,6 +587,23 @@ func (e *mmapNodeExtent) close() error {
 	return firstErr
 }
 
+func (e *mmapNodeExtent) closeAfterSync() error {
+	var firstErr error
+	if e.data != nil {
+		if err := syscall.Munmap(e.data); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		e.data = nil
+	}
+	if e.file != nil {
+		if err := e.file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		e.file = nil
+	}
+	return firstErr
+}
+
 func (e *mmapNodeExtent) destroy() error {
 	var firstErr error
 	if e.data != nil {
@@ -603,4 +634,10 @@ func msyncMmap(data []byte) error {
 		return errno
 	}
 	return nil
+}
+
+func mmapNodeBitmapUsed(bitmap []byte, slot uint64) bool {
+	b := bitmap[slot/8]
+	mask := byte(1 << (slot % 8))
+	return b&mask != 0
 }
