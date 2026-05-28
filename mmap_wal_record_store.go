@@ -421,10 +421,8 @@ type walRecord struct {
 }
 
 func walRecordCRC(record []byte) uint32 {
-	crc := crc32.NewIEEE()
-	_, _ = crc.Write(record[walRecordOpOffset:walRecordCRCOffset])
-	_, _ = crc.Write(record[walRecordHeaderSize:])
-	return crc.Sum32()
+	crc := crc32.Update(0, crc32.IEEETable, record[walRecordOpOffset:walRecordCRCOffset])
+	return crc32.Update(crc, crc32.IEEETable, record[walRecordHeaderSize:])
 }
 
 func isZeroBytes(data []byte) bool {

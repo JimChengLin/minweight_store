@@ -55,6 +55,42 @@ func TestManifestCompactsWhenFull(t *testing.T) {
 	}
 }
 
+func TestManifestObjectWriteUsesCachedLatestRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), manifestName)
+	m := &manifest{path: path}
+	if _, ok, err := m.read(); err != nil || ok {
+		t.Fatalf("manifest.read absent = ok %v err %v, want false,nil", ok, err)
+	}
+
+	first := testManifestState(1)
+	if err := m.write(first); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[manifestCRCOffset] ^= 0xff
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := testManifestState(2)
+	if err := m.write(second); err != nil {
+		t.Fatal(err)
+	}
+	latest, ok, err := readManifestLog(path)
+	if err != nil || !ok {
+		t.Fatalf("readManifestLog = (%+v,%v,%v), want latest,true,nil", latest, ok, err)
+	}
+	if latest.slot != 1 {
+		t.Fatalf("latest slot = %d, want 1", latest.slot)
+	}
+	if latest.state != second {
+		t.Fatalf("latest state = %+v, want %+v", latest.state, second)
+	}
+}
+
 func TestManifestRejectsNoValidRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manifestName)
 	if err := os.WriteFile(path, make([]byte, manifestSize), 0o600); err != nil {

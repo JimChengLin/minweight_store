@@ -105,10 +105,11 @@ func (s *parquetRecordStore) Append(key, value []byte) (minpatricia.Position, er
 		return 0, err
 	}
 
-	written, err := build.writer.Write([]parquetRecord{{
+	records := [1]parquetRecord{{
 		Key:   key,
 		Value: value,
-	}})
+	}}
+	written, err := build.writer.Write(records[:])
 	if err != nil {
 		return 0, err
 	}
@@ -159,6 +160,9 @@ func (s *parquetRecordStore) Sync() error {
 
 func (s *parquetRecordStore) Abort() error {
 	build := s.build
+	if build == nil {
+		return nil
+	}
 	var firstErr error
 	if build.writer != nil {
 		if err := build.writer.Close(); err != nil && firstErr == nil {
@@ -249,6 +253,11 @@ func (s *parquetRecordStore) Len() int {
 
 func (s *parquetRecordStore) Close() error {
 	var firstErr error
+	if s.build != nil {
+		if err := s.Abort(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	for i := range s.keyReaders {
 		if err := s.keyReaders[i].close(); err != nil && firstErr == nil {
 			firstErr = err

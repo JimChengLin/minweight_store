@@ -1,7 +1,7 @@
 # minweight_store
 
-`minweight_store` is a small single-node ordered KV store evolving toward the
-storage design captured in `AGENTS.md`.
+`minweight_store` is a small single-node ordered KV store. The current storage
+behavior and invariants are captured in `AGENTS.md`.
 
 Current V0 is an in-memory ordered KV store backed by
 [`minpatricia`](https://github.com/JimChengLin/minpatricia).
@@ -34,6 +34,8 @@ Range semantics:
 - `ReverseScanRange(lessOrEqual, nil)` visits `(-inf, lessOrEqual]` in descending order.
 - `SeekGE` returns the first item whose key is `>= pivot`.
 - `SeekLE` returns the last item whose key is `<= pivot`.
+- `Delete` on a missing key returns `(false, nil)`. In WAL-backed stores it does
+  not write a delete record for that miss.
 
 ## V1 mmap WAL + flush
 
@@ -53,23 +55,27 @@ positions are 63-bit record handles: high 33 bits are WAL file number, low 30
 bits are offset inside that file. The file suffix determines the record-store
 kind; current WAL segments live under `wal/*.wal`.
 
-`Flush` seals the active WAL, creates a new active WAL, syncs the live primary
-index and sealed WAL, replays the sealed WAL into the secondary checkpoint
-index, syncs and closes the secondary index, then atomically writes `MANIFEST`.
-The live primary index is not switched during flush.
+`Flush` seals the active WAL, creates a new active WAL, syncs the new WAL
+header, syncs the live primary index and sealed WAL, writes `MANIFEST` with
+`primary_wal_flushed=true`, replays the sealed WAL into the secondary checkpoint
+index, syncs and closes the secondary index, then writes `MANIFEST` again with
+`primary_wal_flushed=false`. The live primary index is not switched during
+flush.
 
 `MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
-`next_wal_file_no`, `wal_segment_size`, and a CRC. On startup, a legal manifest
-with an empty WAL tail lets `Open` use the primary runtime index directly:
-no secondary copy, no replay, and no startup flush. If the tail is non-empty,
-`Open` copies the secondary checkpoint index into the primary runtime index,
-replays the active WAL segment after the checkpoint, then syncs the recovered
-primary index. If `Options.WALSize` is unset, `Open` uses manifest
-`wal_segment_size` for future WAL segments; an explicit `Options.WALSize`
-overrides it. Existing WAL segment files are opened at their actual file size.
-When the tail is non-empty, startup also replays it into the secondary
-checkpoint index, syncs secondary, rolls to a new active WAL, and updates
-`MANIFEST`.
+`next_wal_file_no`, `wal_segment_size`, `primary_wal_flushed`, `seq`, and a CRC.
+It is a 4KiB log of 64-byte records; normal commits append and fsync the
+manifest file, and replacement is only used when the log is full. On startup, a
+legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets
+`Open` use the primary runtime index directly: no secondary copy, no replay, and
+no startup flush. If the tail is non-empty, `Open` copies the secondary
+checkpoint index into the primary runtime index, replays the active WAL segment
+after the checkpoint, then checkpoints that recovered state. If
+`primary_wal_flushed=true`, `Open` requires an empty active WAL, trusts the
+synced primary index, copies primary to secondary, and clears the flag. If
+`Options.WALSize` is unset, `Open` uses manifest `wal_segment_size` for future
+WAL segments; an explicit `Options.WALSize` overrides it. Existing WAL segment
+files are opened at their actual file size.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index

@@ -104,6 +104,40 @@ func TestParquetRecordStoreAppendAfterSyncFails(t *testing.T) {
 	}
 }
 
+func TestParquetRecordStoreAbortAfterSyncIsNoOp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
+		{Key: []byte("alpha"), Value: []byte("one")},
+	})
+	defer closeForTest(t, store)
+
+	if err := store.Abort(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParquetRecordStoreCloseAbortsBuild(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "records.parquet")
+	store, err := createParquetRecordStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tmp stat err = %v, want %v", err, os.ErrNotExist)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final stat err = %v, want %v", err, os.ErrNotExist)
+	}
+}
+
 func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{

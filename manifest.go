@@ -27,7 +27,9 @@ const (
 )
 
 type manifest struct {
-	path string
+	path     string
+	nextSeq  uint64
+	nextSlot int
 }
 
 // manifestState is the payload portion of MANIFEST.
@@ -54,11 +56,46 @@ type manifestState struct {
 }
 
 func (m *manifest) read() (manifestState, bool, error) {
-	return readManifest(m.path)
+	record, ok, err := readManifestLog(m.path)
+	if err != nil {
+		return manifestState{}, false, err
+	}
+	if !ok {
+		m.nextSeq = 1
+		m.nextSlot = 0
+		return manifestState{}, false, nil
+	}
+	m.nextSeq, m.nextSlot = nextManifestWrite(record.seq, record.slot)
+	return record.state, true, nil
 }
 
 func (m *manifest) write(state manifestState) error {
-	return writeManifest(m.path, state)
+	if err := validateManifestState(state); err != nil {
+		return err
+	}
+	if m.nextSeq == 0 {
+		record, ok, err := readManifestLog(m.path)
+		if err != nil {
+			return err
+		}
+		if ok {
+			m.nextSeq, m.nextSlot = nextManifestWrite(record.seq, record.slot)
+		} else {
+			m.nextSeq = 1
+			m.nextSlot = 0
+		}
+	}
+	seq, slot := m.nextSeq, m.nextSlot
+	var err error
+	if slot == 0 {
+		err = replaceManifest(m.path, state, seq)
+	} else {
+		err = appendManifestRecord(m.path, state, seq, slot)
+	}
+	if err == nil {
+		m.nextSeq, m.nextSlot = nextManifestWrite(seq, slot)
+	}
+	return err
 }
 
 func (m *manifest) dir() string {
@@ -176,12 +213,20 @@ func writeManifest(path string, state manifestState) error {
 	if !ok {
 		return replaceManifest(path, state, 1)
 	}
-	nextSeq := latest.seq + 1
-	nextSlot := latest.slot + 1
-	if nextSlot >= manifestSlotCount {
-		return replaceManifest(path, state, nextSeq)
+	seq, slot := nextManifestWrite(latest.seq, latest.slot)
+	if slot == 0 {
+		return replaceManifest(path, state, seq)
 	}
-	return appendManifestRecord(path, state, nextSeq, nextSlot)
+	return appendManifestRecord(path, state, seq, slot)
+}
+
+func nextManifestWrite(seq uint64, slot int) (uint64, int) {
+	seq++
+	slot++
+	if slot >= manifestSlotCount {
+		slot = 0
+	}
+	return seq, slot
 }
 
 func encodeManifestRecord(state manifestState, seq uint64) [manifestRecordSize]byte {
