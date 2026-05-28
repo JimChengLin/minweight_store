@@ -50,7 +50,6 @@ type parquetRecordStoreBuilder struct {
 type parquetRecordColumnReader struct {
 	mu    sync.Mutex
 	pages parquet.Pages
-	page  parquet.Page
 }
 
 func createParquetRecordStore(path string, options ...parquet.WriterOption) (*parquetRecordStore, error) {
@@ -322,14 +321,11 @@ func (r *parquetRecordColumnReader) read(row int64) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if r.page != nil {
-		parquet.Release(r.page)
-	}
-	r.page = page
+	defer parquet.Release(page)
 
 	value, ok := firstParquetByteArray(page)
 	if ok {
-		return value, true
+		return cloneBytes(value), true
 	}
 
 	values := [1]parquet.Value{}
@@ -340,7 +336,7 @@ func (r *parquetRecordColumnReader) read(row int64) ([]byte, bool) {
 	if n != 1 {
 		return nil, false
 	}
-	return values[0].ByteArray(), true
+	return cloneBytes(values[0].ByteArray()), true
 }
 
 func firstParquetByteArray(page parquet.Page) ([]byte, bool) {
@@ -356,10 +352,6 @@ func firstParquetByteArray(page parquet.Page) ([]byte, bool) {
 }
 
 func (r *parquetRecordColumnReader) close() error {
-	if r.page != nil {
-		parquet.Release(r.page)
-		r.page = nil
-	}
 	if r.pages == nil {
 		return nil
 	}

@@ -204,6 +204,36 @@ func TestParquetRecordStoreDefaultPageSize(t *testing.T) {
 	}
 }
 
+func TestParquetRecordStoreReturnedBytesDoNotAliasPage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{
+		{Key: []byte("alpha"), Value: []byte("one")},
+	})
+	defer closeForTest(t, store)
+
+	keyPages := captureParquetReaderPages(&store.keyReaders[0])
+	valuePages := captureParquetReaderPages(&store.valueReaders[0])
+
+	key, ok := store.Key(positions[0])
+	if !ok {
+		t.Fatal("missing key")
+	}
+	value, ok := store.Value(positions[0])
+	if !ok {
+		t.Fatal("missing value")
+	}
+
+	poisonParquetPage(t, keyPages.page, "xxxxx")
+	poisonParquetPage(t, valuePages.page, "zzz")
+
+	if string(key) != "alpha" {
+		t.Fatalf("returned key = %q after page mutation, want alpha", key)
+	}
+	if string(value) != "one" {
+		t.Fatalf("returned value = %q after page mutation, want one", value)
+	}
+}
+
 func TestParquetRecordStoreInvalidPosition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, _ := buildParquetRecordStoreForTest(t, path, []parquetRecord{
@@ -272,6 +302,58 @@ func assertParquetRecord(t *testing.T, store *parquetRecordStore, pos minpatrici
 	if !ok || string(gotValue) != value {
 		t.Fatalf("Value(%d) = (%q,%v), want %q,true", pos, gotValue, ok, value)
 	}
+}
+
+type capturingParquetPages struct {
+	parquet.Pages
+	page parquet.Page
+}
+
+func captureParquetReaderPages(reader *parquetRecordColumnReader) *capturingParquetPages {
+	capture := &capturingParquetPages{
+		Pages: reader.pages,
+	}
+	reader.pages = capture
+	return capture
+}
+
+func (p *capturingParquetPages) ReadPage() (parquet.Page, error) {
+	page, err := p.Pages.ReadPage()
+	if err != nil {
+		return nil, err
+	}
+	if p.page != nil {
+		parquet.Release(p.page)
+	}
+	p.page = page
+	parquet.Retain(page)
+	return page, nil
+}
+
+func (p *capturingParquetPages) Close() error {
+	if p.page != nil {
+		parquet.Release(p.page)
+		p.page = nil
+	}
+	return p.Pages.Close()
+}
+
+func poisonParquetPage(t *testing.T, page parquet.Page, replacement string) {
+	t.Helper()
+
+	if page == nil {
+		t.Fatal("page is nil")
+	}
+	values := page.Data()
+	data, offsets := values.ByteArray()
+	if len(offsets) < 2 {
+		t.Fatalf("page offsets len = %d, want at least 2", len(offsets))
+	}
+	value := data[offsets[0]:offsets[1]]
+	if len(value) != len(replacement) {
+		t.Fatalf("page value len = %d, replacement len = %d", len(value), len(replacement))
+	}
+	copy(value, replacement)
 }
 
 func buildParquetRecordStoreForTest(t testing.TB, path string, records []parquetRecord, options ...parquet.WriterOption) (*parquetRecordStore, []minpatricia.Position) {
