@@ -276,7 +276,7 @@ func updateMmapNodeExtentFile(src, dst string) error {
 	if err := msyncMmap(dstData); err != nil {
 		return err
 	}
-	if err := dstFile.Sync(); err != nil {
+	if err := syncMmapFileMetadata(dstFile); err != nil {
 		return err
 	}
 	return nil

@@ -292,7 +292,7 @@ func (s *mmapWALRecordStore) syncMetadata() error {
 	if !s.metadataDirty {
 		return nil
 	}
-	if err := s.file.Sync(); err != nil {
+	if err := syncMmapFileMetadata(s.file); err != nil {
 		return err
 	}
 	s.metadataDirty = false

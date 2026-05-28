@@ -654,7 +654,7 @@ func (e *mmapNodeExtent) syncMetadata() error {
 	if !e.metadataDirty {
 		return nil
 	}
-	if err := e.file.Sync(); err != nil {
+	if err := syncMmapFileMetadata(e.file); err != nil {
 		return err
 	}
 	e.metadataDirty = false
