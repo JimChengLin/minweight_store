@@ -116,7 +116,7 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 	if err != nil {
 		return openedStoreParts{}, err
 	}
-	if err := copyMmapNodeStoreDirIfDifferent(secondaryIndexPath(dir), primaryIndexPath(dir)); err != nil {
+	if err := copyMmapNodeStoreDir(secondaryIndexPath(dir), primaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
 	nodes, err := openMmapNodeStore(primaryIndexPath(dir))
@@ -161,7 +161,7 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
-	if err := copyMmapNodeStoreDirIfDifferent(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
+	if err := copyMmapNodeStoreDir(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
 		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}

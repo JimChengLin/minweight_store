@@ -351,6 +351,119 @@ func TestOpenPrimaryWALFlushedManifestAfterSecondaryReplayTrustsPrimary(t *testi
 	}
 }
 
+func TestOpenPrimaryWALFlushedRejectsNonEmptyActiveWAL(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	simulatePrimaryWALFlushedCheckpointForTest(t, store)
+
+	wal, err := openMmapWALRecordStore(filepath.Join(walSegmentsPath(dir), walSegmentName(firstWALSegmentNo+2)), walSize, firstWALSegmentNo+2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal.Append([]byte("charlie"), []byte("three")); err != nil {
+		_ = wal.Close()
+		t.Fatal(err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{WALSize: walSize})
+	if !errors.Is(err, ErrManifest) {
+		t.Fatalf("Open err = %v, want %v", err, ErrManifest)
+	}
+}
+
+func TestOpenDirtyManifestRequiresSecondaryCheckpoint(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+	if err := os.RemoveAll(secondaryIndexPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{WALSize: walSize})
+	if err == nil {
+		t.Fatal("Open err = nil, want failure without secondary checkpoint")
+	}
+}
+
+func TestOpenPrimaryWALFlushedRecoveryCleansSecondaryCopyTemp(t *testing.T) {
+	const walSize = int64(1 << 20)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	simulatePrimaryWALFlushedCheckpointForTest(t, store)
+
+	temp := filepath.Join(secondaryIndexPath(dir), mmapNodeExtentName(0)+mmapNodeExtentCopyTempSuffix)
+	if err := os.WriteFile(temp, []byte("stale temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	if _, err := os.Stat(temp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secondary copy temp stat err = %v, want %v", err, os.ErrNotExist)
+	}
+}
+
 func TestOpenRejectsCorruptManifest(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})

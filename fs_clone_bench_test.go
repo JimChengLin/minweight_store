@@ -9,10 +9,10 @@ import (
 )
 
 func BenchmarkMmapNodeExtentCopyMethod(b *testing.B) {
-	for _, liveNodes := range []int{128, 1024} {
-		b.Run(fmt.Sprintf("%d_live_nodes", liveNodes), func(b *testing.B) {
+	for _, density := range mmapNodeStoreCopyBenchDensities() {
+		b.Run(density.name, func(b *testing.B) {
 			b.Run("fs_clone", func(b *testing.B) {
-				src := prepareMmapNodeExtentCopyBench(b, liveNodes)
+				src := prepareMmapNodeExtentCopyBench(b, density.liveNodes)
 				root := b.TempDir()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -23,7 +23,7 @@ func BenchmarkMmapNodeExtentCopyMethod(b *testing.B) {
 				}
 			})
 			b.Run("sparse_copy", func(b *testing.B) {
-				src := prepareMmapNodeExtentCopyBench(b, liveNodes)
+				src := prepareMmapNodeExtentCopyBench(b, density.liveNodes)
 				root := b.TempDir()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {

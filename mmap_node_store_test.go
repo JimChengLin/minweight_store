@@ -283,6 +283,64 @@ func TestCopyMmapNodeStoreDirPreservesDestinationDir(t *testing.T) {
 	}
 }
 
+func TestCopyMmapNodeStoreDirUpdatesOnlyDifferentUsedPages(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	srcNodes, err := openMmapNodeStore(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcID, srcPage, err := srcNodes.Alloc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(mmapNodePageBytes(srcPage)[321:], []byte("source used page"))
+	if err := srcNodes.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := srcNodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dstNodes, err := openMmapNodeStore(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstID, dstPage, err := dstNodes.Alloc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dstID != srcID {
+		t.Fatalf("dst id = %d, want %d", dstID, srcID)
+	}
+	copy(mmapNodePageBytes(dstPage)[321:], []byte("old used page"))
+	if err := dstNodes.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := dstNodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srcExtent := filepath.Join(src, mmapNodeExtentName(0))
+	dstExtent := filepath.Join(dst, mmapNodeExtentName(0))
+	unusedOffset := mmapNodeTestPageOffset(10, 555)
+	writeFileBytes(t, srcExtent, unusedOffset, []byte("src-unused"))
+	writeFileBytes(t, dstExtent, unusedOffset, []byte("dst-unused"))
+
+	if err := copyMmapNodeStoreDir(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	gotUsed := readFileBytes(t, dstExtent, mmapNodeTestPageOffset(srcID, 321), len("source used page"))
+	if string(gotUsed) != "source used page" {
+		t.Fatalf("copied used page = %q, want source used page", gotUsed)
+	}
+	gotUnused := readFileBytes(t, dstExtent, unusedOffset, len("dst-unused"))
+	if string(gotUnused) != "dst-unused" {
+		t.Fatalf("unused page = %q, want dst-unused", gotUnused)
+	}
+}
+
 func TestMmapNodeStoreReleasesLaterFreeExtents(t *testing.T) {
 	dir := t.TempDir()
 	nodes, err := openMmapNodeStore(dir)
@@ -451,6 +509,26 @@ func flipFileByte(t *testing.T, path string, offset int64) {
 	}
 	b[0] ^= 0xff
 	if _, err := file.WriteAt(b[:], offset); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFileBytes(t *testing.T, path string, offset int64, data []byte) {
+	t.Helper()
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt(data, offset); err != nil {
 		_ = file.Close()
 		t.Fatal(err)
 	}

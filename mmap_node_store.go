@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	mmapNodeExtentBytes           = 16 * 1024 * 1024
-	mmapNodePageSize              = minpatricia.NodeSize
-	mmapNodePagesPerExtent        = mmapNodeExtentBytes / mmapNodePageSize
-	mmapNodeReservedPages         = 2
-	mmapNodeSlotsPerExtent        = mmapNodePagesPerExtent - mmapNodeReservedPages
-	mmapNodeBitmapBytes           = (mmapNodeSlotsPerExtent + 7) / 8
-	mmapNodeMetaVersion    uint32 = 1
+	mmapNodeExtentBytes             = 16 * 1024 * 1024
+	mmapNodePageSize                = minpatricia.NodeSize
+	mmapNodePagesPerExtent          = mmapNodeExtentBytes / mmapNodePageSize
+	mmapNodeReservedPages           = 2
+	mmapNodeSlotsPerExtent          = mmapNodePagesPerExtent - mmapNodeReservedPages
+	mmapNodeBitmapBytes             = (mmapNodeSlotsPerExtent + 7) / 8
+	mmapNodeMetaVersion      uint32 = 1
+	mmapNodeStoreSyncWorkers        = 8
 )
 
 var mmapNodeMetaMagic = [8]byte{'M', 'W', 'N', 'O', 'D', 'E', '0', '1'}
@@ -36,6 +37,9 @@ type mmapNodeStore struct {
 	dir     string
 	extents []*mmapNodeExtent
 	pages   []*minpatricia.NodePage
+	// Extent create/delete changes directory entries; batching the directory
+	// fsync at Sync/Close avoids one expensive fsync per new extent.
+	dirDirty bool
 }
 
 type mmapNodeExtent struct {
@@ -66,6 +70,7 @@ func openMmapNodeStore(dir string) (*mmapNodeStore, error) {
 		extent.setUsed(0, true)
 		extent.setLiveSlots(1)
 		store.extents = append(store.extents, extent)
+		store.dirDirty = true
 	}
 	store.rebuildPageIndex()
 	if store.extents[0] == nil || store.pages[0] == nil {
@@ -135,6 +140,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 				return 0, nil, err
 			}
 			s.extents[extentID] = extent
+			s.dirDirty = true
 			extent.setUsed(0, true)
 			extent.setLiveSlots(1)
 			page := extent.page(0)
@@ -165,6 +171,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 		return 0, nil, err
 	}
 	s.extents = append(s.extents, extent)
+	s.dirDirty = true
 	extent.setUsed(0, true)
 	extent.setLiveSlots(1)
 	page := extent.page(0)
@@ -204,15 +211,65 @@ func (s *mmapNodeStore) LiveNodes() int {
 }
 
 func (s *mmapNodeStore) Sync() error {
+	return s.syncWithWorkers(mmapNodeStoreSyncWorkers)
+}
+
+func (s *mmapNodeStore) syncWithWorkers(workers int) error {
+	extents := make([]*mmapNodeExtent, 0, len(s.extents))
 	for _, extent := range s.extents {
 		if extent == nil {
 			continue
 		}
-		if err := extent.sync(); err != nil {
+		extents = append(extents, extent)
+	}
+	if err := syncMmapNodeExtents(extents, workers); err != nil {
+		return err
+	}
+	if s.dirDirty {
+		if err := syncDir(s.dir); err != nil {
 			return err
 		}
+		s.dirDirty = false
 	}
 	return nil
+}
+
+func syncMmapNodeExtents(extents []*mmapNodeExtent, workers int) error {
+	workers = boundedWorkers(workers, len(extents))
+	if workers == 0 {
+		return nil
+	}
+	if workers == 1 {
+		for _, extent := range extents {
+			if err := extent.sync(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	jobs := make(chan *mmapNodeExtent)
+	errs := make(chan error, len(extents))
+	for i := 0; i < workers; i++ {
+		go func() {
+			for extent := range jobs {
+				errs <- extent.sync()
+			}
+		}()
+	}
+	go func() {
+		for _, extent := range extents {
+			jobs <- extent
+		}
+		close(jobs)
+	}()
+
+	var firstErr error
+	for range extents {
+		if err := <-errs; err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (s *mmapNodeStore) Close() error {
@@ -224,6 +281,12 @@ func (s *mmapNodeStore) Close() error {
 		if err := extent.close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if s.dirDirty {
+		if err := syncDir(s.dir); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.dirDirty = false
 	}
 	s.extents = nil
 	return firstErr
@@ -247,19 +310,16 @@ func (s *mmapNodeStore) Reset() error {
 	if len(s.extents) == 0 || s.extents[0] == nil {
 		return minpatricia.ErrCorruptLayout
 	}
-	var firstErr error
 	for id := len(s.extents) - 1; id >= 1; id-- {
 		extent := s.extents[id]
 		if extent == nil {
 			continue
 		}
-		if err := extent.destroy(); err != nil && firstErr == nil {
-			firstErr = err
+		if err := extent.destroy(); err != nil {
+			return err
 		}
 		s.extents[id] = nil
-	}
-	if firstErr != nil {
-		return firstErr
+		s.dirDirty = true
 	}
 
 	s.extents = s.extents[:1]
@@ -342,6 +402,7 @@ func (s *mmapNodeStore) releaseFreeExtents() error {
 			return err
 		}
 		s.extents[id] = nil
+		s.dirDirty = true
 		freeCount--
 		if freeCount == 1 {
 			break

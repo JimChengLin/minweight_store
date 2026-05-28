@@ -15,20 +15,27 @@ var errFSCloneUnsupported = errors.New("minweight_store: filesystem clone unsupp
 
 const mmapNodeExtentCopyTempSuffix = ".copytmp"
 
+const mmapNodeStoreCopyWorkers = 4
+
 func copyMmapNodeStoreDir(src, dst string) error {
+	return copyMmapNodeStoreDirWithWorkers(src, dst, mmapNodeStoreCopyWorkers)
+}
+
+func copyMmapNodeStoreDirWithWorkers(src, dst string, workers int) error {
 	srcNames, err := mmapNodeStoreExtentNames(src)
 	if err != nil {
 		return err
 	}
-	if err := ensureMmapNodeStoreCopyTarget(dst); err != nil {
+	targetCreated, err := ensureMmapNodeStoreCopyTarget(dst)
+	if err != nil {
 		return err
 	}
+	dirChanged := false
 
 	srcSet := make(map[string]struct{}, len(srcNames))
 	for _, name := range srcNames {
 		srcSet[name] = struct{}{}
 	}
-
 	dstEntries, err := os.ReadDir(dst)
 	if err != nil {
 		return err
@@ -42,6 +49,7 @@ func copyMmapNodeStoreDir(src, dst string) error {
 			if err := os.Remove(filepath.Join(dst, name)); err != nil {
 				return err
 			}
+			dirChanged = true
 			continue
 		}
 		if _, err := parseMmapNodeExtentID(name); err != nil {
@@ -51,58 +59,89 @@ func copyMmapNodeStoreDir(src, dst string) error {
 			if err := os.Remove(filepath.Join(dst, name)); err != nil {
 				return err
 			}
+			dirChanged = true
 		}
 	}
-	for _, name := range srcNames {
-		srcPath := filepath.Join(src, name)
-		dstPath := filepath.Join(dst, name)
-		equal, err := mmapNodeExtentFilesEqual(srcPath, dstPath)
-		if err != nil {
-			return err
-		}
-		if equal {
-			continue
-		}
-		if err := replaceMmapNodeExtentFile(srcPath, dstPath); err != nil {
-			return err
-		}
-	}
-	return syncDir(dst)
-}
-
-func copyMmapNodeStoreDirIfDifferent(src, dst string) error {
-	equal, err := mmapNodeStoreDirsEqual(src, dst)
+	updatedDir, err := syncMmapNodeExtentFiles(src, dst, srcNames, workers)
 	if err != nil {
 		return err
 	}
-	if equal {
-		return nil
+	dirChanged = dirChanged || updatedDir
+	if dirChanged {
+		if err := syncDir(dst); err != nil {
+			return err
+		}
 	}
-	return copyMmapNodeStoreDir(src, dst)
+	if targetCreated {
+		return syncDir(filepath.Dir(dst))
+	}
+	return nil
 }
 
-func mmapNodeStoreDirsEqual(src, dst string) (bool, error) {
-	srcNames, err := mmapNodeStoreExtentNames(src)
-	if err != nil {
-		return false, err
-	}
-	dstNames, ok, err := maybeMmapNodeStoreExtentNames(dst)
-	if err != nil {
-		return false, err
-	}
-	if !ok || len(srcNames) != len(dstNames) {
+type mmapNodeExtentSyncResult struct {
+	updatedDir bool
+	err        error
+}
+
+func syncMmapNodeExtentFiles(src, dst string, names []string, workers int) (bool, error) {
+	workers = boundedWorkers(workers, len(names))
+	if workers == 0 {
 		return false, nil
 	}
-	for i, name := range srcNames {
-		if name != dstNames[i] {
-			return false, nil
+	if workers == 1 {
+		dirChanged := false
+		for _, name := range names {
+			updatedDir, err := syncMmapNodeExtentFile(filepath.Join(src, name), filepath.Join(dst, name))
+			if err != nil {
+				return false, err
+			}
+			dirChanged = dirChanged || updatedDir
 		}
-		equal, err := mmapNodeExtentFilesEqual(filepath.Join(src, name), filepath.Join(dst, name))
-		if err != nil || !equal {
-			return equal, err
-		}
+		return dirChanged, nil
 	}
-	return true, nil
+	jobs := make(chan string)
+	results := make(chan mmapNodeExtentSyncResult, len(names))
+	for i := 0; i < workers; i++ {
+		go func() {
+			for name := range jobs {
+				updatedDir, err := syncMmapNodeExtentFile(filepath.Join(src, name), filepath.Join(dst, name))
+				results <- mmapNodeExtentSyncResult{updatedDir: updatedDir, err: err}
+			}
+		}()
+	}
+	go func() {
+		for _, name := range names {
+			jobs <- name
+		}
+		close(jobs)
+	}()
+
+	dirChanged := false
+	var firstErr error
+	for range names {
+		result := <-results
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
+		dirChanged = dirChanged || result.updatedDir
+	}
+	if firstErr != nil {
+		return false, firstErr
+	}
+	return dirChanged, nil
+}
+
+func boundedWorkers(workers, jobs int) int {
+	if jobs == 0 {
+		return 0
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > jobs {
+		return jobs
+	}
+	return workers
 }
 
 func mmapNodeStoreExtentNames(dir string) ([]string, error) {
@@ -123,27 +162,6 @@ func mmapNodeStoreExtentNames(dir string) ([]string, error) {
 	return names, nil
 }
 
-func maybeMmapNodeStoreExtentNames(dir string) ([]string, bool, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return nil, false, nil
-		}
-		if _, err := parseMmapNodeExtentID(entry.Name()); err != nil {
-			return nil, false, nil
-		}
-		names = append(names, entry.Name())
-	}
-	return names, true, nil
-}
-
 func requireMmapNodeStoreDir(path string) error {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -158,18 +176,21 @@ func requireMmapNodeStoreDir(path string) error {
 	return nil
 }
 
-func ensureMmapNodeStoreCopyTarget(path string) error {
+func ensureMmapNodeStoreCopyTarget(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return os.MkdirAll(path, 0o755)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !info.IsDir() {
-		return ErrManifest
+		return false, ErrManifest
 	}
-	return nil
+	return false, nil
 }
 
 func copyMmapNodeExtentFile(src, dst string) error {
@@ -184,19 +205,19 @@ func copyMmapNodeExtentFile(src, dst string) error {
 	return copyMmapNodeExtentFileSparse(src, dst)
 }
 
-func replaceMmapNodeExtentFile(src, dst string) error {
-	tmp := dst + mmapNodeExtentCopyTempSuffix
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+func syncMmapNodeExtentFile(src, dst string) (bool, error) {
+	if err := requireMmapNodeExtentPath(src); err != nil {
+		return false, err
 	}
-	if err := copyMmapNodeExtentFile(src, tmp); err != nil {
-		return err
+	if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+		if err := copyMmapNodeExtentFile(src, dst); err != nil {
+			return false, err
+		}
+		return true, nil
+	} else if err != nil {
+		return false, err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return false, updateMmapNodeExtentFile(src, dst)
 }
 
 func isMmapNodeExtentCopyTempName(name string) bool {
@@ -210,63 +231,73 @@ func isMmapNodeExtentCopyTempName(name string) bool {
 	return err == nil
 }
 
-func mmapNodeExtentFilesEqual(src, dst string) (bool, error) {
+func updateMmapNodeExtentFile(src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer srcFile.Close()
 	if err := requireMmapNodeExtentFile(srcFile); err != nil {
-		return false, err
+		return err
 	}
 
-	dstFile, err := os.Open(dst)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
+	dstFile, err := os.OpenFile(dst, os.O_RDWR, 0)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer dstFile.Close()
 	if err := requireMmapNodeExtentFile(dstFile); err != nil {
-		if errors.Is(err, ErrManifest) {
-			return false, nil
-		}
-		return false, err
+		return err
 	}
 
 	srcData, err := syscall.Mmap(int(srcFile.Fd()), 0, mmapNodeExtentBytes, syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer syscall.Munmap(srcData)
-	dstData, err := syscall.Mmap(int(dstFile.Fd()), 0, mmapNodeExtentBytes, syscall.PROT_READ, syscall.MAP_SHARED)
+	dstData, err := syscall.Mmap(int(dstFile.Fd()), 0, mmapNodeExtentBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer syscall.Munmap(dstData)
 
+	dirty := false
 	reservedEnd := mmapNodeReservedPages * mmapNodePageSize
 	if !bytes.Equal(srcData[:reservedEnd], dstData[:reservedEnd]) {
-		return false, nil
+		copy(dstData[:reservedEnd], srcData[:reservedEnd])
+		dirty = true
 	}
 	bitmap := srcData[mmapNodePageSize : mmapNodePageSize*2]
-	return mmapNodeUsedPagesEqual(srcData, dstData, bitmap)
+	pagesDirty := copyDifferentMmapNodeUsedPages(srcData, dstData, bitmap)
+	dirty = dirty || pagesDirty
+	if !dirty {
+		return nil
+	}
+	if err := msyncMmap(dstData); err != nil {
+		return err
+	}
+	if err := dstFile.Sync(); err != nil {
+		return err
+	}
+	return nil
 }
 
-func mmapNodeUsedPagesEqual(src, dst, bitmap []byte) (bool, error) {
+// Used pages are usually allocated in contiguous runs. Compare the whole run
+// first so equal checkpoints skip quickly; copy individual pages only when a
+// run differs.
+func copyDifferentMmapNodeUsedPages(src, dst, bitmap []byte) bool {
+	dirty := false
 	var runStart uint64
 	var runLen uint64
-	compareRun := func() bool {
+	flushRun := func() {
 		if runLen == 0 {
-			return true
+			return
 		}
-		offset := (mmapNodeReservedPages + int(runStart)) * mmapNodePageSize
-		end := offset + int(runLen)*mmapNodePageSize
+		if copyDifferentMmapNodeUsedPageRun(src, dst, runStart, runLen) {
+			dirty = true
+		}
 		runLen = 0
-		return bytes.Equal(src[offset:end], dst[offset:end])
 	}
-
 	for slot := uint64(0); slot < mmapNodeSlotsPerExtent; slot++ {
 		if mmapNodeBitmapUsed(bitmap, slot) {
 			if runLen == 0 {
@@ -275,11 +306,30 @@ func mmapNodeUsedPagesEqual(src, dst, bitmap []byte) (bool, error) {
 			runLen++
 			continue
 		}
-		if !compareRun() {
-			return false, nil
-		}
+		flushRun()
 	}
-	return compareRun(), nil
+	flushRun()
+	return dirty
+}
+
+func copyDifferentMmapNodeUsedPageRun(src, dst []byte, startSlot, slots uint64) bool {
+	offset := (mmapNodeReservedPages + int(startSlot)) * mmapNodePageSize
+	end := offset + int(slots)*mmapNodePageSize
+	if bytes.Equal(src[offset:end], dst[offset:end]) {
+		return false
+	}
+
+	dirty := false
+	for slot := startSlot; slot < startSlot+slots; slot++ {
+		offset := (mmapNodeReservedPages + int(slot)) * mmapNodePageSize
+		end := offset + mmapNodePageSize
+		if bytes.Equal(src[offset:end], dst[offset:end]) {
+			continue
+		}
+		copy(dst[offset:end], src[offset:end])
+		dirty = true
+	}
+	return dirty
 }
 
 func requireMmapNodeExtentPath(path string) error {
