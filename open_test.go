@@ -482,7 +482,9 @@ func TestOpenRejectsCorruptManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data[manifestActiveWALNoOffset] ^= 0xff
+	for offset := 0; offset+manifestRecordSize <= len(data); offset += manifestRecordSize {
+		data[offset+manifestVersionOffset] ^= 0xff
+	}
 	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

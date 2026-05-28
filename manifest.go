@@ -4,14 +4,17 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 )
 
 const (
-	manifestName           = "MANIFEST"
-	manifestVersion uint32 = 3
-	manifestSize           = 44
+	manifestName              = "MANIFEST"
+	manifestVersion    uint32 = 4
+	manifestSize              = 4096
+	manifestRecordSize        = 64
+	manifestSlotCount         = manifestSize / manifestRecordSize
 
 	manifestVersionOffset           = 0
 	manifestCheckpointWALNoOffset   = 4
@@ -19,7 +22,8 @@ const (
 	manifestNextWALNoOffset         = 20
 	manifestWALSegmentSizeOffset    = 28
 	manifestPrimaryWALFlushedOffset = 36
-	manifestCRCOffset               = 40
+	manifestSeqOffset               = 40
+	manifestCRCOffset               = 48
 )
 
 type manifest struct {
@@ -32,7 +36,11 @@ type manifest struct {
 //
 //	version || checkpoint_wal_file_no || active_wal_file_no ||
 //	next_wal_file_no || wal_segment_size || primary_wal_flushed ||
-//	crc32(all previous bytes)
+//	seq || crc32(all previous bytes)
+//
+// MANIFEST is a 4KiB fixed-size log of 64-byte records. Normal writes append
+// the next slot and fsync the file. When the log is full, write compacts by
+// replacing MANIFEST with a fresh file containing only the newest record.
 //
 // It is not mutable in-memory store state. Code builds a fresh manifestState
 // when checkpoint progress changes, then writes that payload with the current
@@ -57,50 +65,127 @@ func (m *manifest) dir() string {
 	return filepath.Dir(m.path)
 }
 
-// readManifest returns the checked payload when MANIFEST exists. The bool is
-// false only when the file is absent; corrupt or incompatible bytes are errors.
+// readManifest returns the latest checked payload when MANIFEST exists. The
+// bool is false only when the file is absent; files with no valid record are
+// errors.
 func readManifest(path string) (manifestState, bool, error) {
-	data, err := os.ReadFile(path)
+	record, ok, err := readManifestLog(path)
+	if err != nil || !ok {
+		return manifestState{}, ok, err
+	}
+	return record.state, true, nil
+}
+
+type manifestRecord struct {
+	state manifestState
+	seq   uint64
+	slot  int
+}
+
+func readManifestLog(path string) (manifestRecord, bool, error) {
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return manifestState{}, false, nil
+		return manifestRecord{}, false, nil
 	}
 	if err != nil {
-		return manifestState{}, false, err
+		return manifestRecord{}, false, err
 	}
-	if len(data) != manifestSize {
-		return manifestState{}, false, ErrManifest
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return manifestRecord{}, false, err
 	}
+	if info.Size() != manifestSize {
+		return manifestRecord{}, false, ErrManifest
+	}
+	var data [manifestSize]byte
+	if _, err := io.ReadFull(file, data[:]); err != nil {
+		return manifestRecord{}, false, err
+	}
+
+	var latest manifestRecord
+	found := false
+	for slot := 0; slot < manifestSlotCount; slot++ {
+		recordData := data[slot*manifestRecordSize : (slot+1)*manifestRecordSize]
+		if manifestRecordEmpty(recordData) {
+			continue
+		}
+		record, ok := decodeManifestRecord(recordData, slot)
+		if !ok {
+			continue
+		}
+		if !found || record.seq > latest.seq {
+			latest = record
+			found = true
+		}
+	}
+	if !found {
+		return manifestRecord{}, false, ErrManifest
+	}
+	return latest, true, nil
+}
+
+func decodeManifestRecord(data []byte, slot int) (manifestRecord, bool) {
 	if version := binary.LittleEndian.Uint32(data[manifestVersionOffset : manifestVersionOffset+4]); version != manifestVersion {
-		return manifestState{}, false, ErrManifest
+		return manifestRecord{}, false
 	}
 	wantCRC := binary.LittleEndian.Uint32(data[manifestCRCOffset : manifestCRCOffset+4])
 	if gotCRC := crc32.ChecksumIEEE(data[:manifestCRCOffset]); gotCRC != wantCRC {
-		return manifestState{}, false, ErrManifest
+		return manifestRecord{}, false
+	}
+	primaryWALFlushed := binary.LittleEndian.Uint32(data[manifestPrimaryWALFlushedOffset : manifestPrimaryWALFlushedOffset+4])
+	if primaryWALFlushed > 1 {
+		return manifestRecord{}, false
 	}
 	state := manifestState{
 		checkpointWALFileNo: binary.LittleEndian.Uint64(data[manifestCheckpointWALNoOffset : manifestCheckpointWALNoOffset+8]),
 		activeWALFileNo:     binary.LittleEndian.Uint64(data[manifestActiveWALNoOffset : manifestActiveWALNoOffset+8]),
 		nextWALFileNo:       binary.LittleEndian.Uint64(data[manifestNextWALNoOffset : manifestNextWALNoOffset+8]),
 		walSegmentSize:      binary.LittleEndian.Uint64(data[manifestWALSegmentSizeOffset : manifestWALSegmentSizeOffset+8]),
+		primaryWALFlushed:   primaryWALFlushed == 1,
 	}
-	primaryWALFlushed := binary.LittleEndian.Uint32(data[manifestPrimaryWALFlushedOffset : manifestPrimaryWALFlushedOffset+4])
-	if primaryWALFlushed > 1 {
-		return manifestState{}, false, ErrManifest
-	}
-	state.primaryWALFlushed = primaryWALFlushed == 1
 	if err := validateManifestState(state); err != nil {
-		return manifestState{}, false, err
+		return manifestRecord{}, false
 	}
-	return state, true, nil
+	seq := binary.LittleEndian.Uint64(data[manifestSeqOffset : manifestSeqOffset+8])
+	if seq == 0 {
+		return manifestRecord{}, false
+	}
+	return manifestRecord{state: state, seq: seq, slot: slot}, true
 }
 
-// writeManifest atomically writes version + payload + crc. The caller owns when
-// a new manifestState becomes durable checkpoint progress.
+func manifestRecordEmpty(data []byte) bool {
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// writeManifest commits version + payload + seq + crc. The caller owns when a
+// new manifestState becomes durable checkpoint progress.
 func writeManifest(path string, state manifestState) error {
 	if err := validateManifestState(state); err != nil {
 		return err
 	}
-	data := make([]byte, manifestSize)
+	latest, ok, err := readManifestLog(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return replaceManifest(path, state, 1)
+	}
+	nextSeq := latest.seq + 1
+	nextSlot := latest.slot + 1
+	if nextSlot >= manifestSlotCount {
+		return replaceManifest(path, state, nextSeq)
+	}
+	return appendManifestRecord(path, state, nextSeq, nextSlot)
+}
+
+func encodeManifestRecord(state manifestState, seq uint64) [manifestRecordSize]byte {
+	var data [manifestRecordSize]byte
 	binary.LittleEndian.PutUint32(data[manifestVersionOffset:manifestVersionOffset+4], manifestVersion)
 	binary.LittleEndian.PutUint64(data[manifestCheckpointWALNoOffset:manifestCheckpointWALNoOffset+8], state.checkpointWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestActiveWALNoOffset:manifestActiveWALNoOffset+8], state.activeWALFileNo)
@@ -109,7 +194,34 @@ func writeManifest(path string, state manifestState) error {
 	if state.primaryWALFlushed {
 		binary.LittleEndian.PutUint32(data[manifestPrimaryWALFlushedOffset:manifestPrimaryWALFlushedOffset+4], 1)
 	}
+	binary.LittleEndian.PutUint64(data[manifestSeqOffset:manifestSeqOffset+8], seq)
 	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], crc32.ChecksumIEEE(data[:manifestCRCOffset]))
+	return data
+}
+
+func appendManifestRecord(path string, state manifestState, seq uint64, slot int) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	record := encodeManifestRecord(state, seq)
+	if _, err := file.WriteAt(record[:], int64(slot*manifestRecordSize)); err != nil {
+		firstErr = err
+	}
+	if firstErr == nil {
+		firstErr = file.Sync()
+	}
+	if err := file.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+func replaceManifest(path string, state manifestState, seq uint64) error {
+	data := make([]byte, manifestSize)
+	record := encodeManifestRecord(state, seq)
+	copy(data, record[:])
 
 	tmp := path + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
