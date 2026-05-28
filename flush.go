@@ -53,7 +53,6 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 	if err != nil {
 		return 0, err
 	}
-	active := records.activeSegment()
 	state := manifestState{
 		checkpointWALFileNo: oldWALFileNo,
 		activeWALFileNo:     records.activeFileNo,
@@ -63,7 +62,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 	}
 	activeSync := make(chan error, 1)
 	go func() {
-		activeSync <- active.Sync()
+		activeSync <- records.Sync()
 	}()
 
 	if err := syncPrimaryIndexAndWAL(backend, oldWAL); err != nil {

@@ -43,10 +43,11 @@ type mmapNodeStore struct {
 }
 
 type mmapNodeExtent struct {
-	id   uint64
-	path string
-	file *os.File
-	data []byte
+	id            uint64
+	path          string
+	file          *os.File
+	data          []byte
+	metadataDirty bool
 }
 
 func openMmapNodeStore(dir string) (*mmapNodeStore, error) {
@@ -445,10 +446,11 @@ func createMmapNodeExtent(dir string, id uint64) (*mmapNodeExtent, error) {
 		return nil, err
 	}
 	extent := &mmapNodeExtent{
-		id:   id,
-		path: path,
-		file: file,
-		data: data,
+		id:            id,
+		path:          path,
+		file:          file,
+		data:          data,
+		metadataDirty: true,
 	}
 	extent.writeMeta(0)
 	extentOwnedByCaller = true
@@ -622,7 +624,7 @@ func (e *mmapNodeExtent) sync() error {
 	if err := msyncMmap(e.data); err != nil {
 		return err
 	}
-	return e.file.Sync()
+	return e.syncMetadata()
 }
 
 func (e *mmapNodeExtent) close() error {
@@ -637,7 +639,7 @@ func (e *mmapNodeExtent) close() error {
 		e.data = nil
 	}
 	if e.file != nil {
-		if err := e.file.Sync(); err != nil && firstErr == nil {
+		if err := e.syncMetadata(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := e.file.Close(); err != nil && firstErr == nil {
@@ -646,6 +648,17 @@ func (e *mmapNodeExtent) close() error {
 		e.file = nil
 	}
 	return firstErr
+}
+
+func (e *mmapNodeExtent) syncMetadata() error {
+	if !e.metadataDirty {
+		return nil
+	}
+	if err := e.file.Sync(); err != nil {
+		return err
+	}
+	e.metadataDirty = false
+	return nil
 }
 
 func (e *mmapNodeExtent) closeAfterSync() error {

@@ -182,6 +182,35 @@ func TestMmapNodeStoreReopen(t *testing.T) {
 	}
 }
 
+func TestMmapNodeStoreSyncClearsExtentMetadataDirty(t *testing.T) {
+	dir := t.TempDir()
+	nodes, err := openMmapNodeStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nodes.extents[0].metadataDirty {
+		t.Fatal("new extent metadataDirty = false, want true")
+	}
+	if err := nodes.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if nodes.extents[0].metadataDirty {
+		t.Fatal("metadataDirty after Sync = true, want false")
+	}
+	if err := nodes.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes, err = openMmapNodeStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, nodes)
+	if nodes.extents[0].metadataDirty {
+		t.Fatal("reopened extent metadataDirty = true, want false")
+	}
+}
+
 func TestMmapNodeStoreSparseCopySkipsUnusedPages(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()

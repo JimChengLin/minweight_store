@@ -28,6 +28,7 @@ type segmentedRecordStore struct {
 	segments     map[uint64]*mmapWALRecordStore
 	activeFileNo uint64
 	nextFileNo   uint64
+	dirDirty     bool
 }
 
 func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo uint64) (*segmentedRecordStore, error) {
@@ -75,7 +76,7 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 
 	for _, id := range ids {
 		path := filepath.Join(dir, walSegmentName(id))
-		openSize, err := existingWALSegmentSize(path, size)
+		openSize, missing, err := walSegmentOpenSize(path, size)
 		if err != nil {
 			return nil, err
 		}
@@ -85,6 +86,9 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 		}
 		wal.sealed = id != activeFileNo
 		store.segments[id] = wal
+		if missing {
+			store.dirDirty = true
+		}
 	}
 	storeOwnedByCaller = true
 	return store, nil
@@ -131,7 +135,10 @@ func (s *segmentedRecordStore) Sync() error {
 	if active == nil {
 		return ErrClosed
 	}
-	return active.Sync()
+	if err := active.Sync(); err != nil {
+		return err
+	}
+	return s.syncDirIfDirty()
 }
 
 func (s *segmentedRecordStore) Close() error {
@@ -143,6 +150,12 @@ func (s *segmentedRecordStore) Close() error {
 		if err := segment.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if s.dirDirty {
+		if err := syncDir(s.dir); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.dirDirty = false
 	}
 	s.segments = nil
 	s.activeFileNo = 0
@@ -184,6 +197,7 @@ func (s *segmentedRecordStore) Rollover() (*mmapWALRecordStore, error) {
 	s.segments[newFileNo] = wal
 	s.activeFileNo = newFileNo
 	s.nextFileNo = newFileNo + 1
+	s.dirDirty = true
 	return old, nil
 }
 
@@ -217,15 +231,33 @@ func (s *segmentedRecordStore) activeSegment() *mmapWALRecordStore {
 	return s.segments[s.activeFileNo]
 }
 
-func existingWALSegmentSize(path string, configuredSize int64) (int64, error) {
+func (s *segmentedRecordStore) syncDirIfDirty() error {
+	s.mu.Lock()
+	if !s.dirDirty {
+		s.mu.Unlock()
+		return nil
+	}
+	s.dirDirty = false
+	s.mu.Unlock()
+
+	if err := syncDir(s.dir); err != nil {
+		s.mu.Lock()
+		s.dirDirty = true
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func walSegmentOpenSize(path string, configuredSize int64) (int64, bool, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return configuredSize, nil
+		return configuredSize, true, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return info.Size(), nil
+	return info.Size(), false, nil
 }
 
 func listWALSegmentIDs(dir string) ([]uint64, error) {

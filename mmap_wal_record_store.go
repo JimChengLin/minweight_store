@@ -45,12 +45,13 @@ const (
 )
 
 type mmapWALRecordStore struct {
-	fileNo uint64
-	file   *os.File
-	data   []byte
-	size   uint64
-	used   uint64
-	sealed bool
+	fileNo        uint64
+	file          *os.File
+	data          []byte
+	size          uint64
+	used          uint64
+	sealed        bool
+	metadataDirty bool
 }
 
 func openMmapWALRecordStore(path string, size int64, fileNo uint64) (*mmapWALRecordStore, error) {
@@ -80,10 +81,12 @@ func openMmapWALRecordStore(path string, size int64, fileNo uint64) (*mmapWALRec
 	if err != nil {
 		return nil, err
 	}
+	metadataDirty := false
 	if info.Size() == 0 {
 		if err := file.Truncate(size); err != nil {
 			return nil, err
 		}
+		metadataDirty = true
 	} else if info.Size() != size {
 		return nil, errors.Join(ErrCorruptWAL, errors.New("wal size does not match configured size"))
 	}
@@ -93,10 +96,11 @@ func openMmapWALRecordStore(path string, size int64, fileNo uint64) (*mmapWALRec
 		return nil, err
 	}
 	store := &mmapWALRecordStore{
-		fileNo: fileNo,
-		file:   file,
-		data:   data,
-		size:   uint64(size),
+		fileNo:        fileNo,
+		file:          file,
+		data:          data,
+		size:          uint64(size),
+		metadataDirty: metadataDirty,
 	}
 	if isZeroBytes(data[:walHeaderSize]) {
 		store.initHeader()
@@ -258,7 +262,7 @@ func (s *mmapWALRecordStore) Sync() error {
 	if err := msyncMmap(s.data); err != nil {
 		return err
 	}
-	return s.file.Sync()
+	return s.syncMetadata()
 }
 
 func (s *mmapWALRecordStore) Close() error {
@@ -273,7 +277,7 @@ func (s *mmapWALRecordStore) Close() error {
 		s.data = nil
 	}
 	if s.file != nil {
-		if err := s.file.Sync(); err != nil && firstErr == nil {
+		if err := s.syncMetadata(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := s.file.Close(); err != nil && firstErr == nil {
@@ -282,6 +286,17 @@ func (s *mmapWALRecordStore) Close() error {
 		s.file = nil
 	}
 	return firstErr
+}
+
+func (s *mmapWALRecordStore) syncMetadata() error {
+	if !s.metadataDirty {
+		return nil
+	}
+	if err := s.file.Sync(); err != nil {
+		return err
+	}
+	s.metadataDirty = false
+	return nil
 }
 
 func (s *mmapWALRecordStore) closeAfterSync() error {
