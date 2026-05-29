@@ -41,8 +41,7 @@ Range semantics:
 
 ```go
 store, err := minweight_store.Open("db", minweight_store.Options{
-	WALSize:         64 << 20,
-	WALReplayPolicy: minweight_store.WALReplayStrict,
+	WALSize: 128 << 20,
 })
 if err != nil {
 	return err
@@ -76,6 +75,8 @@ synced primary index, copies primary to secondary, and clears the flag. If
 `Options.WALSize` is unset, `Open` uses manifest `wal_segment_size` for future
 WAL segments; an explicit `Options.WALSize` overrides it. Existing WAL segment
 files are opened at their actual file size.
+Default options use a 128MiB WAL segment, `WALReplayPointInTime`, and
+`VerifyIndexOnRead=false`.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index

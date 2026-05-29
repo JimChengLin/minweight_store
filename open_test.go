@@ -549,9 +549,42 @@ func TestWALRecordCRC(t *testing.T) {
 
 func TestOpenStrictRejectsCorruptWAL(t *testing.T) {
 	dir, walSize, _, _ := corruptMiddleWAL(t)
-	_, err := Open(dir, Options{WALSize: walSize})
+	_, err := Open(dir, Options{
+		WALSize:         walSize,
+		WALReplayPolicy: WALReplayStrict,
+	})
 	if !errors.Is(err, ErrCorruptWAL) {
 		t.Fatalf("Open err = %v, want %v", err, ErrCorruptWAL)
+	}
+}
+
+func TestOpenDefaults(t *testing.T) {
+	dir, walSize, corruptPos, _ := corruptMiddleWAL(t)
+	store, err := Open(dir, Options{WALSize: walSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	assertGet(t, store, "alpha", "one")
+	assertMissing(t, store, "bravo")
+	assertMissing(t, store, "charlie")
+
+	wal := store.records.activeSegment()
+	if wal.used != recordPositionOffset(corruptPos) {
+		t.Fatalf("wal used = %d, want %d", wal.used, recordPositionOffset(corruptPos))
+	}
+	if store.backend.verifyIndexOnRead {
+		t.Fatal("VerifyIndexOnRead default = true, want false")
+	}
+
+	defaultStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, defaultStore)
+	if defaultStore.records.size != defaultWALSize {
+		t.Fatalf("default WALSize = %d, want %d", defaultStore.records.size, defaultWALSize)
 	}
 }
 

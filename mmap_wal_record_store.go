@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultWALSize int64 = 64 * 1024 * 1024
+	defaultWALSize int64 = 128 * 1024 * 1024
 
 	walVersion uint32 = 1
 
@@ -37,10 +37,10 @@ var walHeaderMagic = [8]byte{'M', 'W', 'W', 'A', 'L', '0', '1', 0}
 type WALReplayPolicy uint8
 
 const (
-	// WALReplayStrict fails Open on the first corrupt WAL record.
-	WALReplayStrict WALReplayPolicy = iota
 	// WALReplayPointInTime replays the valid prefix and truncates the WAL there.
-	WALReplayPointInTime
+	WALReplayPointInTime WALReplayPolicy = iota
+	// WALReplayStrict fails Open on the first corrupt WAL record.
+	WALReplayStrict
 	// WALReplayBestEffort deletes corrupt bytes before replaying CRC-valid records.
 	WALReplayBestEffort
 )
