@@ -32,13 +32,14 @@ type recordSegment interface {
 }
 
 type segmentedRecordStore struct {
-	rootDir      string
-	size         int64
-	mu           sync.RWMutex
-	segments     map[uint64]recordSegment
-	active       *mmapWALRecordStore
-	activeFileNo uint64
-	nextFileNo   uint64
+	rootDir           string
+	size              int64
+	mu                sync.RWMutex
+	segments          map[uint64]recordSegment
+	active            *mmapWALRecordStore
+	activeFileNo      uint64
+	nextFileNo        uint64
+	pendingDeleteWALs map[uint64]struct{}
 	// Parquet segment creation syncs sst/ in parquetRecordStore.Sync().
 	walDirDirty bool
 }
@@ -70,11 +71,12 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 	}
 
 	store := &segmentedRecordStore{
-		rootDir:      dir,
-		size:         size,
-		segments:     make(map[uint64]recordSegment, len(ids)),
-		activeFileNo: activeFileNo,
-		nextFileNo:   nextFileNo,
+		rootDir:           dir,
+		size:              size,
+		segments:          make(map[uint64]recordSegment, len(ids)),
+		activeFileNo:      activeFileNo,
+		nextFileNo:        nextFileNo,
+		pendingDeleteWALs: make(map[uint64]struct{}),
 	}
 	storeOwnedByCaller := false
 	defer func() {
@@ -318,6 +320,9 @@ func (s *segmentedRecordStore) compactableWALFileNos(checkpointWALFileNo uint64,
 
 	ids := make([]uint64, 0, len(s.segments))
 	for fileNo, segment := range s.segments {
+		if _, pendingDelete := s.pendingDeleteWALs[fileNo]; pendingDelete {
+			continue
+		}
 		if fileNo <= checkpointWALFileNo {
 			if _, ok := segment.(*mmapWALRecordStore); ok {
 				ids = append(ids, fileNo)
@@ -331,6 +336,69 @@ func (s *segmentedRecordStore) compactableWALFileNos(checkpointWALFileNo uint64,
 		return nil
 	}
 	return ids[:len(ids)-keep]
+}
+
+func (s *segmentedRecordStore) scheduleWALDelete(fileNo uint64) error {
+	return s.scheduleWALDeleteMaybeMissing(fileNo, false)
+}
+
+func (s *segmentedRecordStore) scheduleWALDeleteIfPresent(fileNo uint64) error {
+	return s.scheduleWALDeleteMaybeMissing(fileNo, true)
+}
+
+func (s *segmentedRecordStore) scheduleWALDeleteMaybeMissing(fileNo uint64, missingOK bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if fileNo == s.activeFileNo {
+		return ErrManifest
+	}
+	if _, ok := s.segments[fileNo].(*mmapWALRecordStore); !ok {
+		if missingOK && s.segments[fileNo] == nil {
+			return nil
+		}
+		return ErrManifest
+	}
+	s.pendingDeleteWALs[fileNo] = struct{}{}
+	return nil
+}
+
+func (s *segmentedRecordStore) deletePendingWALs() error {
+	s.mu.Lock()
+	if len(s.pendingDeleteWALs) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	wals := make([]*mmapWALRecordStore, 0, len(s.pendingDeleteWALs))
+	for fileNo := range s.pendingDeleteWALs {
+		if fileNo == s.activeFileNo {
+			s.mu.Unlock()
+			return ErrManifest
+		}
+		wal, ok := s.segments[fileNo].(*mmapWALRecordStore)
+		if !ok {
+			s.mu.Unlock()
+			return ErrManifest
+		}
+		wals = append(wals, wal)
+		delete(s.segments, fileNo)
+		delete(s.pendingDeleteWALs, fileNo)
+	}
+	s.mu.Unlock()
+
+	var firstErr error
+	for _, wal := range wals {
+		if err := wal.closeAfterSync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := os.Remove(filepath.Join(walSegmentsPath(s.rootDir), walSegmentName(wal.fileNo))); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return syncDir(walSegmentsPath(s.rootDir))
 }
 
 func (s *segmentedRecordStore) segment(fileNo uint64) recordSegment {

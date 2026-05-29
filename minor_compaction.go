@@ -212,6 +212,9 @@ func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64, entries [
 		if err == nil {
 			err = retargetInstalledSSTEntries(s.records, backend.index, sstFileNo, entries)
 		}
+		if err == nil {
+			err = s.records.scheduleWALDelete(sourceWALFileNo)
+		}
 		if err != nil && !walFull {
 			s.fatal = errors.Join(ErrFatal, err)
 			err = s.fatal
@@ -261,12 +264,12 @@ func retargetInstalledSSTEntries(records *segmentedRecordStore, index *minpatric
 	return nil
 }
 
-func installSSTIntoIndex(records *segmentedRecordStore, index *minpatricia.Index, sourceWALFileNo, sstFileNo uint64) error {
+func applyInstallSSTRecord(records *segmentedRecordStore, index *minpatricia.Index, sourceWALFileNo, sstFileNo uint64) error {
 	sst, err := records.parquetSegment(sstFileNo)
 	if err != nil {
 		return err
 	}
-	return sst.scanKeys(func(rowIndex uint64, key []byte) error {
+	if err := sst.scanKeys(func(rowIndex uint64, key []byte) error {
 		oldPos, ok, err := index.Get(key)
 		if err != nil || !ok {
 			return err
@@ -286,6 +289,22 @@ func installSSTIntoIndex(records *segmentedRecordStore, index *minpatricia.Index
 			return ErrCorruptIndex
 		}
 		return records.Free(oldPos)
+	}); err != nil {
+		return err
+	}
+	return records.scheduleWALDelete(sourceWALFileNo)
+}
+
+func scheduleInstalledSSTDeletesFromWAL(records *segmentedRecordStore, fileNo uint64) error {
+	return records.ReplayWAL(fileNo, WALReplayStrict, func(op byte, key []byte, pos minpatricia.Position) error {
+		if op != walOpInstallSST {
+			return nil
+		}
+		sourceWALFileNo, _, err := decodeInstallSSTPayload(key)
+		if err != nil {
+			return err
+		}
+		return records.scheduleWALDeleteIfPresent(sourceWALFileNo)
 	})
 }
 

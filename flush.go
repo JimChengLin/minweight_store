@@ -18,10 +18,6 @@ func (s *Store) flushWithSecondaryLocked() error {
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 
-	return s.flushWithPrimaryLocked()
-}
-
-func (s *Store) flushWithPrimaryLocked() error {
 	backend, err := s.openBackend()
 	if err != nil {
 		return err
@@ -76,6 +72,9 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 	}
 	state.primaryWALFlushed = false
 	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy); err != nil {
+		return 0, err
+	}
+	if err := records.deletePendingWALs(); err != nil {
 		return 0, err
 	}
 	if err := manifest.write(state); err != nil {
@@ -160,24 +159,7 @@ func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFile
 		}
 	}
 
-	if err := records.ReplayWAL(walFileNo, policy, func(op byte, key []byte, pos minpatricia.Position) error {
-		switch op {
-		case walOpPut:
-			_, _, err := index.Put(key, pos)
-			return err
-		case walOpDelete:
-			_, _, err := index.Delete(key)
-			return err
-		case walOpInstallSST:
-			sourceWALFileNo, sstFileNo, err := decodeInstallSSTPayload(key)
-			if err != nil {
-				return err
-			}
-			return installSSTIntoIndex(records, index, sourceWALFileNo, sstFileNo)
-		default:
-			return ErrCorruptWAL
-		}
-	}); err != nil {
+	if err := replayWALIntoIndex(records, walFileNo, policy, index); err != nil {
 		return err
 	}
 	if err := nodes.Sync(); err != nil {

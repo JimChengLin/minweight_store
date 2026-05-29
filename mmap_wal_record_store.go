@@ -53,6 +53,7 @@ type mmapWALRecordStore struct {
 	size          uint64
 	used          uint64
 	sealed        bool
+	dataDirty     bool
 	metadataDirty bool
 }
 
@@ -268,31 +269,33 @@ func (s *mmapWALRecordStore) truncate(used uint64) error {
 }
 
 func (s *mmapWALRecordStore) Sync() error {
-	if err := msyncMmap(s.data); err != nil {
-		return err
+	if s.dataDirty {
+		if err := msyncMmap(s.data); err != nil {
+			return err
+		}
+		s.dataDirty = false
 	}
 	return s.syncMetadata()
 }
 
 func (s *mmapWALRecordStore) Close() error {
 	var firstErr error
-	if s.data != nil {
-		if err := msyncMmap(s.data); err != nil && firstErr == nil {
-			firstErr = err
+	if s.data != nil && s.dataDirty {
+		if err := msyncMmap(s.data); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			s.dataDirty = false
 		}
-		if err := syscall.Munmap(s.data); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		s.data = nil
 	}
 	if s.file != nil {
 		if err := s.syncMetadata(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if err := s.file.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		s.file = nil
+	}
+	if err := s.closeAfterSync(); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
 }
@@ -444,6 +447,7 @@ func (s *mmapWALRecordStore) loadHeader() error {
 
 func (s *mmapWALRecordStore) writeUsed() {
 	binary.LittleEndian.PutUint64(s.data[walHeaderUsedOffset:walHeaderUsedOffset+8], s.used)
+	s.dataDirty = true
 }
 
 type walRecord struct {

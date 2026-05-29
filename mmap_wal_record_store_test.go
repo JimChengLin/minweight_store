@@ -16,6 +16,9 @@ func TestMmapWALRecordStoreSyncClearsMetadataDirty(t *testing.T) {
 	if !wal.metadataDirty {
 		t.Fatal("new WAL metadataDirty = false, want true")
 	}
+	if !wal.dataDirty {
+		t.Fatal("new WAL dataDirty = false, want true")
+	}
 	if _, err := wal.Append([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +27,9 @@ func TestMmapWALRecordStoreSyncClearsMetadataDirty(t *testing.T) {
 	}
 	if wal.metadataDirty {
 		t.Fatal("metadataDirty after Sync = true, want false")
+	}
+	if wal.dataDirty {
+		t.Fatal("dataDirty after Sync = true, want false")
 	}
 	if err := wal.Close(); err != nil {
 		t.Fatal(err)
@@ -36,5 +42,14 @@ func TestMmapWALRecordStoreSyncClearsMetadataDirty(t *testing.T) {
 	defer closeForTest(t, wal)
 	if wal.metadataDirty {
 		t.Fatal("reopened WAL metadataDirty = true, want false")
+	}
+	if wal.dataDirty {
+		t.Fatal("reopened WAL dataDirty = true, want false")
+	}
+	if _, err := wal.Append([]byte("beta"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if !wal.dataDirty {
+		t.Fatal("dataDirty after append = false, want true")
 	}
 }

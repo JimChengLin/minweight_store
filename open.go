@@ -135,11 +135,13 @@ func openCleanManifest(dir string, records *segmentedRecordStore, checkpointWALF
 	if err != nil {
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred := false
+	defer closeMmapNodesUnlessOwnershipTransferred(nodes, &nodesOwnershipTransferred)
 	backend, err := openIndexBackend(records, nodes)
 	if err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred = true
 	return openedStoreParts{
 		backend:             backend,
 		records:             records,
@@ -160,20 +162,20 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 	if err != nil {
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred := false
+	defer closeMmapNodesUnlessOwnershipTransferred(nodes, &nodesOwnershipTransferred)
 	backend, err := openIndexBackend(records, nodes)
 	if err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
 	if err := replayWALIntoIndex(records, walFileNo, replayPolicy, backend.index); err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
 	checkpointWALFileNo, err := checkpointActiveWAL(dir, backend, records, manifest, state.checkpointWALFileNo, replayPolicy)
 	if err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred = true
 	return openedStoreParts{
 		backend:             backend,
 		records:             records,
@@ -193,20 +195,26 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 	if err != nil {
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred := false
+	defer closeMmapNodesUnlessOwnershipTransferred(nodes, &nodesOwnershipTransferred)
 	backend, err := openIndexBackend(records, nodes)
 	if err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
 	if err := copyMmapNodeStoreDir(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
-		_ = nodes.Close()
+		return openedStoreParts{}, err
+	}
+	if err := scheduleInstalledSSTDeletesFromWAL(records, state.checkpointWALFileNo); err != nil {
+		return openedStoreParts{}, err
+	}
+	if err := records.deletePendingWALs(); err != nil {
 		return openedStoreParts{}, err
 	}
 	state.primaryWALFlushed = false
 	if err := manifest.write(state); err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred = true
 	return openedStoreParts{
 		backend:             backend,
 		records:             records,
@@ -273,16 +281,17 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 	if err != nil {
 		return openedStoreParts{}, err
 	}
+	nodesOwnershipTransferred := false
+	defer closeMmapNodesUnlessOwnershipTransferred(nodes, &nodesOwnershipTransferred)
 	backend := newIndexBackendWithNodes(records, nodes)
 	if err := replayWALIntoIndex(records, firstWALSegmentNo, replayPolicy, backend.index); err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
 	if err := backend.nodes.Sync(); err != nil {
-		_ = nodes.Close()
 		return openedStoreParts{}, err
 	}
 	recordsOwnedByStore = true
+	nodesOwnershipTransferred = true
 	return openedStoreParts{
 		backend: backend,
 		records: records,
@@ -344,11 +353,17 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 			if err != nil {
 				return err
 			}
-			return installSSTIntoIndex(records, index, sourceWALFileNo, sstFileNo)
+			return applyInstallSSTRecord(records, index, sourceWALFileNo, sstFileNo)
 		default:
 			return ErrCorruptWAL
 		}
 	})
+}
+
+func closeMmapNodesUnlessOwnershipTransferred(nodes *mmapNodeStore, ownershipTransferred *bool) {
+	if !*ownershipTransferred {
+		_ = nodes.Close()
+	}
 }
 
 func primaryIndexPath(dir string) string {

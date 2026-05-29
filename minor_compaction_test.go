@@ -46,6 +46,146 @@ func TestMinorCompactWritesParquetUnderSSTDir(t *testing.T) {
 	assertDirEntrySuffixes(t, sstSegmentsPath(dir), parquetSegmentSuffix)
 }
 
+func TestMinorCompactDeletesSourceWALOnNextFlush(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+	defer closeForTest(t, store)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	if !walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL deleted before install_sst checkpoint")
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL still exists after install_sst checkpoint")
+	}
+
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	assertGet(t, store, "charlie", "three")
+	parquetFileNo := onlyParquetFileNoForTest(t, store)
+	assertIndexFileNoForKey(t, store, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, store, "bravo", parquetFileNo)
+}
+
+func TestMinorCompactDeletesSourceWALAfterDirtyInstallSSTReplay(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL still exists after dirty install_sst replay checkpoint")
+	}
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+	parquetFileNo := onlyParquetFileNoForTest(t, reopened)
+	assertIndexFileNoForKey(t, reopened, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
+}
+
+func TestMinorCompactDeletedSourceWALBeforeFinalManifestRecovers(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	simulateCheckpointAfterPendingWALDeleteBeforeManifestForTest(t, store)
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL still exists before simulated crash")
+	}
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL was recreated during primary_wal_flushed recovery")
+	}
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+	parquetFileNo := onlyParquetFileNoForTest(t, reopened)
+	assertIndexFileNoForKey(t, reopened, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
+}
+
+func TestMinorCompactFinalManifestDoesNotNeedDeletedSourceWAL(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL still exists after final manifest")
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+	parquetFileNo := onlyParquetFileNoForTest(t, reopened)
+	assertIndexFileNoForKey(t, reopened, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
+}
+
+func TestMinorCompactPrimaryFlushedRecoveryDeletesSourceWAL(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	simulatePrimaryWALFlushedCheckpointForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
+		t.Fatal("source WAL still exists after primary_wal_flushed recovery")
+	}
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+	parquetFileNo := onlyParquetFileNoForTest(t, reopened)
+	assertIndexFileNoForKey(t, reopened, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
+}
+
 func TestMinorCompactMemoryStoreNoop(t *testing.T) {
 	store := New()
 
@@ -628,6 +768,41 @@ func compactWithCorruptInstallSSTForTest(t *testing.T) string {
 	return dir
 }
 
+func simulateCheckpointAfterPendingWALDeleteBeforeManifestForTest(t *testing.T, store *Store) {
+	t.Helper()
+
+	store.stopMinorCompactionDispatcher()
+	oldWALFileNo := store.records.activeFileNo
+	oldWAL, err := store.records.Rollover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := store.records.activeSegment()
+	if err := syncPrimaryIndexAndWAL(store.backend, oldWAL); err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	state := manifestState{
+		checkpointWALFileNo: oldWALFileNo,
+		activeWALFileNo:     store.records.activeFileNo,
+		nextFileNo:          store.records.nextFileNo,
+		walSegmentSize:      uint64(store.records.size),
+		primaryWALFlushed:   true,
+	}
+	if err := store.manifest.write(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointSecondaryIndex(store.manifest.dir(), store.records, oldWALFileNo, WALReplayStrict); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.records.deletePendingWALs(); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+}
+
 func assertDirEntrySuffixes(t *testing.T, dir, suffix string) {
 	t.Helper()
 
@@ -640,4 +815,18 @@ func assertDirEntrySuffixes(t *testing.T, dir, suffix string) {
 			t.Fatalf("entry %s in %s, want only %s files", entry.Name(), dir, suffix)
 		}
 	}
+}
+
+func walFileExistsForTest(t *testing.T, dir string, fileNo uint64) bool {
+	t.Helper()
+
+	_, err := os.Stat(filepath.Join(walSegmentsPath(dir), walSegmentName(fileNo)))
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }
