@@ -1,7 +1,7 @@
 # minweight_store
 
 `minweight_store` is a small single-node ordered KV store. The current storage
-behavior and invariants are captured in `AGENTS.md`.
+behavior is summarized below.
 
 Current V0 is an in-memory ordered KV store backed by
 [`minpatricia`](https://github.com/JimChengLin/minpatricia).
@@ -55,12 +55,13 @@ positions are 63-bit record handles: high 33 bits are record file number, low
 record-store kind; current Store positions point to WAL segments under
 `wal/*.wal` or compacted Parquet segments under `sst/*.parquet`.
 
-`Flush` seals the active WAL, creates a new active WAL, syncs the new WAL
-header, syncs the live primary index and sealed WAL, writes `MANIFEST` with
-`primary_wal_flushed=true`, replays the sealed WAL into the secondary checkpoint
-index, syncs and closes the secondary index, then writes `MANIFEST` again with
-`primary_wal_flushed=false`. The live primary index is not switched during
-flush.
+`Flush` seals the active WAL, creates a new active WAL, syncs the new active WAL
+header and WAL directory state, syncs the live primary index and sealed WAL,
+writes `MANIFEST` with `primary_wal_flushed=true`, replays the sealed WAL into
+the secondary checkpoint index, syncs and closes the secondary index, deletes
+pending source WALs made obsolete by `install_sst`, fsyncs `wal/`, then writes
+`MANIFEST` again with `primary_wal_flushed=false`. The live primary index is not
+switched during flush.
 
 `MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
 `next_file_no`, `wal_segment_size`, `primary_wal_flushed`, `seq`, and a CRC.
@@ -76,18 +77,22 @@ synced primary index, copies primary to secondary, and clears the flag. If
 `Options.WALSize` is unset, `Open` uses manifest `wal_segment_size` for future
 WAL segments; an explicit `Options.WALSize` overrides it. Existing WAL segment
 files are opened at their actual file size.
+With a legal manifest, startup also removes valid `sst/*.parquet.tmp` files and
+uncommitted Parquet files at or above the manifest `next_file_no`, except for
+Parquet files that dirty WAL replay already installed and opened.
 Default options use a 128MiB WAL segment, `WALReplayPointInTime`,
 `VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`, and
 `MaxImmutableWALNum=1`.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index
-by replaying WAL segment 1.
+by replaying WAL segment 1. The no-manifest path is WAL-only; Parquet/SST state
+belongs to the manifest-backed lifecycle.
 
 `Close` is a no-op for durability when the active WAL is empty. Otherwise it
-performs a graceful checkpoint by syncing the live primary index and sealed WAL,
-replaying new WAL records into the secondary checkpoint index, rolling to a new
-empty active WAL, syncing that WAL header, then writing `MANIFEST`.
+uses the same checkpoint path as flush: rollover, sync primary/sealed WAL/new
+active WAL header, publish `primary_wal_flushed=true`, replay and sync
+secondary, delete pending source WALs, then publish `primary_wal_flushed=false`.
 
 Replay policies apply when rebuilding from WAL and when replaying WAL into the
 secondary checkpoint index:
@@ -98,10 +103,16 @@ secondary checkpoint index:
 - `WALReplayBestEffort`: repair the WAL before replay by keeping CRC-valid
   records and deleting corrupt bytes, then replay the repaired WAL strictly.
 
-Minor compaction can materialize checkpointed immutable WAL records into a
-Parquet segment. It scans a sealed WAL, sorts put records by key, filters each
-candidate by comparing the current index position, writes the live records into
-Parquet, appends an `install_sst` WAL record (`op=3`, payload is source WAL
-file number plus Parquet file number), then retargets primary index entries
-from the source WAL file number to the new Parquet file number. WAL garbage
-collection is intentionally left for a later version.
+Minor compaction materializes checkpointed immutable WAL records into Parquet
+segments. It considers WALs with `fileNo <= checkpoint_wal_file_no` while
+keeping the newest `MaxImmutableWALNum` immutable WALs. For each source WAL, it
+strictly replays records, sorts put candidates by key, filters each candidate by
+probing the current index position, writes live records into Parquet, syncs and
+installs that segment, appends an `install_sst` WAL record (`op=3`, payload is
+source WAL file number plus Parquet file number), retargets primary index
+entries from the source WAL file number to the new Parquet file number, and
+schedules the source WAL for deletion. Delete-only WALs can compact to an empty
+Parquet segment so the source WAL deletion still has a durable `install_sst`
+record. Pending source WALs are deleted only after a later checkpoint has replayed
+the `install_sst` into the secondary index, and before the final
+`primary_wal_flushed=false` manifest commit.
