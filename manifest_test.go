@@ -108,11 +108,25 @@ func TestManifestRejectsNoValidRecord(t *testing.T) {
 	}
 }
 
+func TestManifestAllowsNextFileNoToSkip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), manifestName)
+	state := testManifestState(1)
+	state.nextFileNo = state.activeWALFileNo + 8
+
+	if err := writeManifest(path, state); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := readManifest(path)
+	if err != nil || !ok || got != state {
+		t.Fatalf("readManifest = (%+v,%v,%v), want state,true,nil", got, ok, err)
+	}
+}
+
 func testManifestState(checkpoint uint64) manifestState {
 	return manifestState{
 		checkpointWALFileNo: checkpoint,
 		activeWALFileNo:     checkpoint + 1,
-		nextWALFileNo:       checkpoint + 2,
+		nextFileNo:          checkpoint + 2,
 		walSegmentSize:      1 << 20,
 	}
 }

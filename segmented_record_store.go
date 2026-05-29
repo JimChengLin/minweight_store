@@ -56,7 +56,7 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 	if ids[len(ids)-1] != activeFileNo {
 		return nil, ErrManifest
 	}
-	if nextFileNo != activeFileNo+1 {
+	if nextFileNo <= activeFileNo {
 		return nil, ErrManifest
 	}
 

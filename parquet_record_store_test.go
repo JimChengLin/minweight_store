@@ -11,6 +11,8 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
+const parquetRecordTestFileNo = 7
+
 func TestParquetRecordStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	input := []parquetRecord{
@@ -42,7 +44,7 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := openParquetRecordStore(path)
+	reopened, err := openParquetRecordStore(path, parquetRecordTestFileNo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestParquetRecordStoreRoundTrip(t *testing.T) {
 
 func TestParquetRecordStoreWritesIncrementally(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
-	store, err := createParquetRecordStore(path, parquet.MaxRowsPerRowGroup(1))
+	store, err := createParquetRecordStore(path, parquetRecordTestFileNo, parquet.MaxRowsPerRowGroup(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +121,7 @@ func TestParquetRecordStoreAbortAfterSyncIsNoOp(t *testing.T) {
 func TestParquetRecordStoreCloseAbortsBuild(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "records.parquet")
-	store, err := createParquetRecordStore(path)
+	store, err := createParquetRecordStore(path, parquetRecordTestFileNo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +140,7 @@ func TestParquetRecordStoreCloseAbortsBuild(t *testing.T) {
 	}
 }
 
-func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
+func TestParquetRecordStorePositionsUseFileNoAndRowIndex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.parquet")
 	store, positions := buildParquetRecordStoreForTest(t, path, []parquetRecord{
 		{Key: []byte("alpha"), Value: []byte("one")},
@@ -148,12 +150,12 @@ func TestParquetRecordStorePositionsUseRowGroupAndRow(t *testing.T) {
 	defer closeForTest(t, store)
 
 	for i, pos := range positions {
-		rowGroup, row, ok := parseParquetRecordPosition(pos)
+		fileNo, row, ok := parseParquetRecordPosition(pos)
 		if !ok {
 			t.Fatalf("position %d did not parse", pos)
 		}
-		if rowGroup != uint64(i) || row != 0 {
-			t.Fatalf("position %d = rowGroup %d row %d, want %d 0", pos, rowGroup, row, i)
+		if fileNo != parquetRecordTestFileNo || row != uint64(i) {
+			t.Fatalf("position %d = fileNo %d row %d, want %d %d", pos, fileNo, row, parquetRecordTestFileNo, i)
 		}
 	}
 	assertParquetRecord(t, store, positions[2], "charlie", "three")
@@ -247,7 +249,7 @@ func TestParquetRecordStoreInvalidPosition(t *testing.T) {
 	if value, ok := store.Value(minpatricia.Position(minpatriciaHandleTag)); ok || value != nil {
 		t.Fatalf("Value(tagged) = (%q,%v), want nil,false", value, ok)
 	}
-	if pos, err := makeParquetRecordPosition(parquetRecordMaxRowGroupIndex+1, 0); err == nil || pos != 0 {
+	if pos, err := makeParquetRecordPosition(parquetRecordTestFileNo, parquetRecordMaxRowIndex+1); err == nil || pos != 0 {
 		t.Fatalf("makeParquetRecordPosition overflow = (%d,%v), want 0,error", pos, err)
 	}
 }
@@ -359,7 +361,7 @@ func poisonParquetPage(t *testing.T, page parquet.Page, replacement string) {
 func buildParquetRecordStoreForTest(t testing.TB, path string, records []parquetRecord, options ...parquet.WriterOption) (*parquetRecordStore, []minpatricia.Position) {
 	t.Helper()
 
-	store, err := createParquetRecordStore(path, options...)
+	store, err := createParquetRecordStore(path, parquetRecordTestFileNo, options...)
 	if err != nil {
 		t.Fatal(err)
 	}

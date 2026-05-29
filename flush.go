@@ -56,7 +56,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 	state := manifestState{
 		checkpointWALFileNo: oldWALFileNo,
 		activeWALFileNo:     records.activeFileNo,
-		nextWALFileNo:       records.nextFileNo,
+		nextFileNo:          records.nextFileNo,
 		walSegmentSize:      uint64(records.size),
 		primaryWALFlushed:   true,
 	}

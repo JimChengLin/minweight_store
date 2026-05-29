@@ -200,7 +200,7 @@ func benchmarkParquetRecordStoreWrite(b *testing.B, data parquetRecordStoreBench
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		store, err := createParquetRecordStore(path)
+		store, err := createParquetRecordStore(path, parquetRecordTestFileNo)
 		if err != nil {
 			b.Fatal(err)
 		}

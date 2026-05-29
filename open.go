@@ -52,11 +52,11 @@ func Open(dir string, options ...Options) (*Store, error) {
 			cfg.WALSize = int64(state.walSegmentSize)
 		}
 		if !state.primaryWALFlushed {
-			if err := dropEmptyRolloverWAL(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextWALFileNo); err != nil {
+			if err := dropEmptyRolloverWAL(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextFileNo); err != nil {
 				return nil, err
 			}
 		}
-		records, err := openSegmentedRecordStore(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextWALFileNo)
+		records, err := openSegmentedRecordStore(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextFileNo)
 		if err != nil {
 			return nil, err
 		}
@@ -212,17 +212,17 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 	if len(ids) > 1 || len(ids) == 1 && ids[0] != firstWALSegmentNo {
 		return openedStoreParts{}, ErrManifest
 	}
-	var activeWALFileNo, nextWALFileNo uint64
+	var activeWALFileNo, nextFileNo uint64
 	if len(ids) == 1 {
 		activeWALFileNo = firstWALSegmentNo
-		nextWALFileNo = firstWALSegmentNo + 1
+		nextFileNo = firstWALSegmentNo + 1
 	}
 	// Without a manifest commit point, primary is only stale runtime state.
 	// The only legal recovery path is rebuilding it from WAL segment 1.
 	if err := os.RemoveAll(primaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
-	records, err := openSegmentedRecordStore(walDir, walSize, activeWALFileNo, nextWALFileNo)
+	records, err := openSegmentedRecordStore(walDir, walSize, activeWALFileNo, nextFileNo)
 	if err != nil {
 		return openedStoreParts{}, err
 	}

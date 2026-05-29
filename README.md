@@ -50,9 +50,10 @@ defer store.Close()
 ```
 
 `Open` uses segmented fixed-size mmap WAL files as the record store. Index
-positions are 63-bit record handles: high 33 bits are WAL file number, low 30
-bits are offset inside that file. The file suffix determines the record-store
-kind; current WAL segments live under `wal/*.wal`.
+positions are 63-bit record handles: high 33 bits are record file number, low
+30 bits are offset or row inside that file. The file suffix determines the
+record-store kind; current Store positions point to WAL segments under
+`wal/*.wal`.
 
 `Flush` seals the active WAL, creates a new active WAL, syncs the new WAL
 header, syncs the live primary index and sealed WAL, writes `MANIFEST` with
@@ -62,7 +63,7 @@ index, syncs and closes the secondary index, then writes `MANIFEST` again with
 flush.
 
 `MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
-`next_wal_file_no`, `wal_segment_size`, `primary_wal_flushed`, `seq`, and a CRC.
+`next_file_no`, `wal_segment_size`, `primary_wal_flushed`, `seq`, and a CRC.
 It is a 4KiB log of 64-byte records; normal commits append and fsync the
 manifest file, and replacement is only used when the log is full. On startup, a
 legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets

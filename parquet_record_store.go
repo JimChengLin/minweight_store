@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/JimChengLin/minpatricia"
@@ -12,12 +13,8 @@ import (
 )
 
 const (
-	parquetRecordRowIndexBits       = 32
-	parquetRecordRowIndexMask       = 1<<parquetRecordRowIndexBits - 1
-	parquetRecordMaxRowIndex        = parquetRecordRowIndexMask
-	parquetRecordMaxRowsPerRowGroup = parquetRecordMaxRowIndex + 1
-	parquetRecordMaxEncodedRowGroup = minpatriciaHandleTag>>parquetRecordRowIndexBits - 1
-	parquetRecordMaxRowGroupIndex   = parquetRecordMaxEncodedRowGroup - 1
+	parquetRecordMaxRowIndex        = recordOffsetMask
+	parquetRecordMaxRowsPerRowGroup = int64(recordOffsetLimit)
 	parquetRecordKeyColumn          = 0
 	parquetRecordValueColumn        = 1
 	parquetRecordColumnCount        = 2
@@ -31,8 +28,10 @@ type parquetRecord struct {
 
 type parquetRecordStore struct {
 	path         string
+	fileNo       uint64
 	file         *os.File
 	rowGroups    []parquet.RowGroup
+	rowStarts    []uint64
 	keyReaders   []parquetRecordColumnReader
 	valueReaders []parquetRecordColumnReader
 	build        *parquetRecordStoreBuilder
@@ -43,7 +42,6 @@ type parquetRecordStoreBuilder struct {
 	writer             *parquet.GenericWriter[parquetRecord]
 	file               *os.File
 	maxRowsPerRowGroup uint64
-	rowGroupIndex      uint64
 	rowIndex           uint64
 }
 
@@ -52,7 +50,10 @@ type parquetRecordColumnReader struct {
 	pages parquet.Pages
 }
 
-func createParquetRecordStore(path string, options ...parquet.WriterOption) (*parquetRecordStore, error) {
+func createParquetRecordStore(path string, fileNo uint64, options ...parquet.WriterOption) (*parquetRecordStore, error) {
+	if fileNo == 0 || fileNo >= recordFileNoLimit {
+		return nil, minpatricia.ErrPositionTag
+	}
 	config, err := parquet.NewWriterConfig(options...)
 	if err != nil {
 		return nil, err
@@ -63,7 +64,7 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 	if config.PageBufferSize == parquet.DefaultPageBufferSize {
 		config.PageBufferSize = parquetRecordDefaultPageSize
 	}
-	if config.MaxRowsPerRowGroup <= 0 || uint64(config.MaxRowsPerRowGroup) > parquetRecordMaxRowsPerRowGroup {
+	if config.MaxRowsPerRowGroup <= 0 || config.MaxRowsPerRowGroup > parquetRecordMaxRowsPerRowGroup {
 		return nil, ErrParquet
 	}
 
@@ -82,7 +83,8 @@ func createParquetRecordStore(path string, options ...parquet.WriterOption) (*pa
 	}()
 
 	store := &parquetRecordStore{
-		path: path,
+		path:   path,
+		fileNo: fileNo,
 		build: &parquetRecordStoreBuilder{
 			tmpPath:            tmp,
 			file:               file,
@@ -99,7 +101,7 @@ func (s *parquetRecordStore) Append(key, value []byte) (minpatricia.Position, er
 	if build == nil {
 		return 0, ErrParquet
 	}
-	pos, err := makeParquetRecordPosition(build.rowGroupIndex, build.rowIndex)
+	pos, err := makeParquetRecordPosition(s.fileNo, build.rowIndex)
 	if err != nil {
 		return 0, err
 	}
@@ -117,10 +119,6 @@ func (s *parquetRecordStore) Append(key, value []byte) (minpatricia.Position, er
 	}
 
 	build.rowIndex++
-	if build.rowIndex == build.maxRowsPerRowGroup {
-		build.rowIndex = 0
-		build.rowGroupIndex++
-	}
 	return pos, nil
 }
 
@@ -148,7 +146,7 @@ func (s *parquetRecordStore) Sync() error {
 		return err
 	}
 
-	store, err := openParquetRecordStore(s.path)
+	store, err := openParquetRecordStore(s.path, s.fileNo)
 	if err != nil {
 		return err
 	}
@@ -182,7 +180,10 @@ func (s *parquetRecordStore) Abort() error {
 	return firstErr
 }
 
-func openParquetRecordStore(path string) (*parquetRecordStore, error) {
+func openParquetRecordStore(path string, fileNo uint64) (*parquetRecordStore, error) {
+	if fileNo == 0 || fileNo >= recordFileNoLimit {
+		return nil, minpatricia.ErrPositionTag
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -211,8 +212,10 @@ func openParquetRecordStore(path string) (*parquetRecordStore, error) {
 	storeOwnedByCaller = true
 	return &parquetRecordStore{
 		path:         path,
+		fileNo:       fileNo,
 		file:         file,
 		rowGroups:    rowGroups,
+		rowStarts:    parquetRecordRowStarts(rowGroups),
 		keyReaders:   newParquetRecordColumnReaders(rowGroups, parquetRecordKeyColumn),
 		valueReaders: newParquetRecordColumnReaders(rowGroups, parquetRecordValueColumn),
 	}, nil
@@ -284,16 +287,32 @@ func (s *parquetRecordStore) closeAfterSync() error {
 }
 
 func (s *parquetRecordStore) recordLocation(pos minpatricia.Position) (int, int64, bool) {
-	rowGroup, row, ok := parseParquetRecordPosition(pos)
-	if !ok || rowGroup >= uint64(len(s.rowGroups)) {
+	fileNo, rowIndex, ok := parseParquetRecordPosition(pos)
+	if !ok || fileNo != s.fileNo {
 		return 0, 0, false
 	}
+	rowGroup := sort.Search(len(s.rowStarts), func(i int) bool {
+		return s.rowStarts[i] > rowIndex
+	}) - 1
+	if rowGroup < 0 {
+		return 0, 0, false
+	}
+	start := s.rowStarts[rowGroup]
+	rows := uint64(s.rowGroups[rowGroup].NumRows())
+	if rowIndex >= start+rows {
+		return 0, 0, false
+	}
+	return rowGroup, int64(rowIndex - start), true
+}
 
-	group := s.rowGroups[rowGroup]
-	if row >= uint64(group.NumRows()) {
-		return 0, 0, false
+func parquetRecordRowStarts(rowGroups []parquet.RowGroup) []uint64 {
+	starts := make([]uint64, len(rowGroups))
+	var next uint64
+	for i, group := range rowGroups {
+		starts[i] = next
+		next += uint64(group.NumRows())
 	}
-	return int(rowGroup), int64(row), true
+	return starts
 }
 
 func newParquetRecordColumnReaders(rowGroups []parquet.RowGroup, column int) []parquetRecordColumnReader {
@@ -361,14 +380,11 @@ func (r *parquetRecordColumnReader) close() error {
 }
 
 func validateParquetRecordLayout(rowGroups []parquet.RowGroup, rows int64) error {
-	if rows < 0 || rows > int64(maxInt) {
+	if rows < 0 || uint64(rows) > recordOffsetLimit {
 		return ErrParquet
 	}
 	var total uint64
-	for rowGroup, group := range rowGroups {
-		if uint64(rowGroup) > parquetRecordMaxRowGroupIndex {
-			return ErrParquet
-		}
+	for _, group := range rowGroups {
 		chunks := group.ColumnChunks()
 		if len(chunks) != parquetRecordColumnCount ||
 			chunks[parquetRecordKeyColumn].Type().Kind() != parquet.ByteArray ||
@@ -376,11 +392,11 @@ func validateParquetRecordLayout(rowGroups []parquet.RowGroup, rows int64) error
 			return ErrParquet
 		}
 		groupRows := group.NumRows()
-		if groupRows < 0 || uint64(groupRows) > parquetRecordMaxRowsPerRowGroup {
+		if groupRows < 0 || groupRows > parquetRecordMaxRowsPerRowGroup {
 			return ErrParquet
 		}
 		total += uint64(groupRows)
-		if total > uint64(maxInt) {
+		if total > recordOffsetLimit {
 			return ErrParquet
 		}
 	}
@@ -390,21 +406,20 @@ func validateParquetRecordLayout(rowGroups []parquet.RowGroup, rows int64) error
 	return nil
 }
 
-func makeParquetRecordPosition(rowGroup, row uint64) (minpatricia.Position, error) {
-	if rowGroup > parquetRecordMaxRowGroupIndex || row > parquetRecordMaxRowIndex {
+func makeParquetRecordPosition(fileNo, row uint64) (minpatricia.Position, error) {
+	if row > parquetRecordMaxRowIndex {
 		return 0, ErrParquet
 	}
-	return minpatricia.Position(((rowGroup + 1) << parquetRecordRowIndexBits) | row), nil
+	return makeRecordPosition(fileNo, row)
 }
 
 func parseParquetRecordPosition(pos minpatricia.Position) (uint64, uint64, bool) {
-	raw := uint64(pos)
-	if raw == 0 || raw&minpatriciaHandleTag != 0 {
+	if uint64(pos)&minpatriciaHandleTag != 0 {
 		return 0, 0, false
 	}
-	group := raw >> parquetRecordRowIndexBits
-	if group == 0 {
+	fileNo := recordPositionFileNo(pos)
+	if fileNo == 0 {
 		return 0, 0, false
 	}
-	return group - 1, raw & parquetRecordRowIndexMask, true
+	return fileNo, recordPositionOffset(pos), true
 }

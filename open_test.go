@@ -875,7 +875,7 @@ func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
 	state := manifestState{
 		checkpointWALFileNo: oldWALFileNo,
 		activeWALFileNo:     store.records.activeFileNo,
-		nextWALFileNo:       store.records.nextFileNo,
+		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
 	}
@@ -903,7 +903,7 @@ func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, s
 	state := manifestState{
 		checkpointWALFileNo: oldWALFileNo,
 		activeWALFileNo:     store.records.activeFileNo,
-		nextWALFileNo:       store.records.nextFileNo,
+		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
 	}

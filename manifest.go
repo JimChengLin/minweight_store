@@ -19,7 +19,7 @@ const (
 	manifestVersionOffset           = 0
 	manifestCheckpointWALNoOffset   = 4
 	manifestActiveWALNoOffset       = 12
-	manifestNextWALNoOffset         = 20
+	manifestNextFileNoOffset        = 20
 	manifestWALSegmentSizeOffset    = 28
 	manifestPrimaryWALFlushedOffset = 36
 	manifestSeqOffset               = 40
@@ -38,7 +38,7 @@ type manifest struct {
 // The complete on-disk manifest is:
 //
 //	version || checkpoint_wal_file_no || active_wal_file_no ||
-//	next_wal_file_no || wal_segment_size || primary_wal_flushed ||
+//	next_file_no || wal_segment_size || primary_wal_flushed ||
 //	seq || crc32(all previous bytes)
 //
 // MANIFEST is a 4KiB fixed-size log of 64-byte records. Normal writes append
@@ -51,7 +51,7 @@ type manifest struct {
 type manifestState struct {
 	checkpointWALFileNo uint64
 	activeWALFileNo     uint64
-	nextWALFileNo       uint64
+	nextFileNo          uint64
 	walSegmentSize      uint64
 	primaryWALFlushed   bool
 }
@@ -177,7 +177,7 @@ func decodeManifestRecord(data []byte, slot int) (manifestRecord, bool) {
 	state := manifestState{
 		checkpointWALFileNo: binary.LittleEndian.Uint64(data[manifestCheckpointWALNoOffset : manifestCheckpointWALNoOffset+8]),
 		activeWALFileNo:     binary.LittleEndian.Uint64(data[manifestActiveWALNoOffset : manifestActiveWALNoOffset+8]),
-		nextWALFileNo:       binary.LittleEndian.Uint64(data[manifestNextWALNoOffset : manifestNextWALNoOffset+8]),
+		nextFileNo:          binary.LittleEndian.Uint64(data[manifestNextFileNoOffset : manifestNextFileNoOffset+8]),
 		walSegmentSize:      binary.LittleEndian.Uint64(data[manifestWALSegmentSizeOffset : manifestWALSegmentSizeOffset+8]),
 		primaryWALFlushed:   primaryWALFlushed == 1,
 	}
@@ -205,7 +205,7 @@ func encodeManifestRecord(state manifestState, seq uint64) [manifestRecordSize]b
 	binary.LittleEndian.PutUint32(data[manifestVersionOffset:manifestVersionOffset+4], manifestVersion)
 	binary.LittleEndian.PutUint64(data[manifestCheckpointWALNoOffset:manifestCheckpointWALNoOffset+8], state.checkpointWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestActiveWALNoOffset:manifestActiveWALNoOffset+8], state.activeWALFileNo)
-	binary.LittleEndian.PutUint64(data[manifestNextWALNoOffset:manifestNextWALNoOffset+8], state.nextWALFileNo)
+	binary.LittleEndian.PutUint64(data[manifestNextFileNoOffset:manifestNextFileNoOffset+8], state.nextFileNo)
 	binary.LittleEndian.PutUint64(data[manifestWALSegmentSizeOffset:manifestWALSegmentSizeOffset+8], state.walSegmentSize)
 	if state.primaryWALFlushed {
 		binary.LittleEndian.PutUint32(data[manifestPrimaryWALFlushedOffset:manifestPrimaryWALFlushedOffset+4], 1)
@@ -271,7 +271,7 @@ func replaceManifest(path string, state manifestState, seq uint64) error {
 }
 
 func validateManifestState(state manifestState) error {
-	if state.checkpointWALFileNo == 0 || state.activeWALFileNo != state.checkpointWALFileNo+1 || state.nextWALFileNo != state.activeWALFileNo+1 {
+	if state.checkpointWALFileNo == 0 || state.activeWALFileNo <= state.checkpointWALFileNo || state.nextFileNo <= state.activeWALFileNo {
 		return ErrManifest
 	}
 	if state.walSegmentSize < walHeaderSize+walRecordHeaderSize || state.walSegmentSize > recordOffsetLimit {
