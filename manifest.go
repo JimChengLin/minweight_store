@@ -118,37 +118,10 @@ func (m *manifest) close() error {
 	return err
 }
 
-// readManifest returns the latest checked payload when MANIFEST exists. The
-// bool is false only when the file is absent; files with no valid record are
-// errors.
-func readManifest(path string) (manifestState, bool, error) {
-	record, ok, err := readManifestLog(path)
-	if err != nil || !ok {
-		return manifestState{}, ok, err
-	}
-	return record.state, true, nil
-}
-
 type manifestRecord struct {
 	state manifestState
 	seq   uint64
 	slot  int
-}
-
-func readManifestLog(path string) (manifestRecord, bool, error) {
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return manifestRecord{}, false, nil
-	}
-	if err != nil {
-		return manifestRecord{}, false, err
-	}
-	defer file.Close()
-	record, err := readManifestLogFile(file)
-	if err != nil {
-		return manifestRecord{}, false, err
-	}
-	return record, true, nil
 }
 
 func readManifestLogFile(file *os.File) (manifestRecord, error) {
@@ -171,7 +144,7 @@ func readManifestLogFile(file *os.File) (manifestRecord, error) {
 	found := false
 	for slot := 0; slot < manifestSlotCount; slot++ {
 		recordData := data[slot*manifestRecordSize : (slot+1)*manifestRecordSize]
-		if manifestRecordEmpty(recordData) {
+		if isZeroBytes(recordData) {
 			continue
 		}
 		record, ok := decodeManifestRecord(recordData, slot)
@@ -216,39 +189,6 @@ func decodeManifestRecord(data []byte, slot int) (manifestRecord, bool) {
 		return manifestRecord{}, false
 	}
 	return manifestRecord{state: state, seq: seq, slot: slot}, true
-}
-
-func manifestRecordEmpty(data []byte) bool {
-	return isZeroBytes(data)
-}
-
-// writeManifest commits version + payload + seq + crc. The caller owns when a
-// new manifestState becomes durable checkpoint progress.
-func writeManifest(path string, state manifestState) error {
-	if err := validateManifestState(state); err != nil {
-		return err
-	}
-	latest, ok, err := readManifestLog(path)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return replaceManifest(path, state, 1)
-	}
-	seq, slot := nextManifestWrite(latest.seq, latest.slot)
-	if slot == 0 {
-		return replaceManifest(path, state, seq)
-	}
-	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	var firstErr error
-	firstErr = appendManifestRecord(file, state, seq, slot)
-	if err := file.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
 }
 
 func nextManifestWrite(seq uint64, slot int) (uint64, int) {
