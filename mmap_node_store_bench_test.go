@@ -110,6 +110,101 @@ func BenchmarkNodeStorePutReplace(b *testing.B) {
 	}
 }
 
+func BenchmarkMmapNodeStoreAllocAfterFullExtents(b *testing.B) {
+	for _, fullExtents := range []int{1, 8} {
+		b.Run(fmt.Sprintf("full_extents_%d/active_extent", fullExtents), func(b *testing.B) {
+			benchmarkMmapNodeStoreAllocAfterFullExtents(b, fullExtents, (*mmapNodeStore).Alloc)
+		})
+		b.Run(fmt.Sprintf("full_extents_%d/linear_scan_baseline", fullExtents), func(b *testing.B) {
+			benchmarkMmapNodeStoreAllocAfterFullExtents(b, fullExtents, allocMmapNodeStoreByLinearScanForBench)
+		})
+	}
+}
+
+func BenchmarkMmapNodeStoreAllocAfterManyFullExtents(b *testing.B) {
+	for _, fullExtents := range []int{64, 1024} {
+		b.Run(fmt.Sprintf("full_extents_%d/active_extent", fullExtents), func(b *testing.B) {
+			benchmarkFakeMmapNodeStoreAllocAfterFullExtents(b, fullExtents, (*mmapNodeStore).Alloc)
+		})
+		b.Run(fmt.Sprintf("full_extents_%d/linear_scan_baseline", fullExtents), func(b *testing.B) {
+			benchmarkFakeMmapNodeStoreAllocAfterFullExtents(b, fullExtents, allocMmapNodeStoreByLinearScanForBench)
+		})
+	}
+}
+
+func benchmarkMmapNodeStoreAllocAfterFullExtents(
+	b *testing.B,
+	fullExtents int,
+	alloc func(*mmapNodeStore) (uint64, *minpatricia.NodePage, error),
+) {
+	b.Helper()
+
+	nodes := newMmapNodeStoreAllocBench(b, fullExtents)
+	extent := nodes.extents[fullExtents]
+	wantID := uint64(fullExtents) * mmapNodeSlotsPerExtent
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		id, _, err := alloc(nodes)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if id != wantID {
+			b.Fatalf("Alloc id = %d, want %d", id, wantID)
+		}
+		extent.setUsed(0, false)
+		extent.setLiveSlots(0)
+		nodes.setPage(id, nil)
+	}
+}
+
+func benchmarkFakeMmapNodeStoreAllocAfterFullExtents(
+	b *testing.B,
+	fullExtents int,
+	alloc func(*mmapNodeStore) (uint64, *minpatricia.NodePage, error),
+) {
+	b.Helper()
+
+	nodes := newFakeMmapNodeStoreAllocBench(fullExtents)
+	extent := nodes.extents[fullExtents]
+	wantID := uint64(fullExtents) * mmapNodeSlotsPerExtent
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		id, _, err := alloc(nodes)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if id != wantID {
+			b.Fatalf("Alloc id = %d, want %d", id, wantID)
+		}
+		extent.setUsed(0, false)
+		extent.setLiveSlots(0)
+		nodes.setPage(id, nil)
+	}
+}
+
+func allocMmapNodeStoreByLinearScanForBench(s *mmapNodeStore) (uint64, *minpatricia.NodePage, error) {
+	for _, extent := range s.extents {
+		if extent == nil || extent.liveSlots() == mmapNodeSlotsPerExtent {
+			continue
+		}
+		id, page, ok := extent.alloc()
+		if !ok {
+			continue
+		}
+		if id&minpatriciaHandleTag != 0 {
+			return 0, nil, minpatricia.ErrPositionTag
+		}
+		s.setPage(id, page)
+		return id, page, nil
+	}
+	s.activeExtentIndex = len(s.extents)
+	return s.Alloc()
+}
+
 func benchmarkNodeStores(b *testing.B, sizeName string, data nodeStoreBenchData, run func(*testing.B, *minpatricia.Index)) {
 	b.Helper()
 
@@ -184,4 +279,62 @@ func newNodeStoreBenchReplacementPositions(data nodeStoreBenchData) []minpatrici
 		replacements[i] = pos
 	}
 	return replacements
+}
+
+func newMmapNodeStoreAllocBench(b *testing.B, fullExtents int) *mmapNodeStore {
+	b.Helper()
+
+	dir := b.TempDir()
+	extents := make([]*mmapNodeExtent, fullExtents+1)
+	for id := range extents {
+		extent, err := createMmapNodeExtent(dir, uint64(id))
+		if err != nil {
+			closeMmapNodeExtents(extents)
+			b.Fatal(err)
+		}
+		if id < fullExtents {
+			markMmapNodeExtentFullForBench(extent)
+		}
+		extents[id] = extent
+	}
+	nodes := &mmapNodeStore{
+		dir:     dir,
+		extents: extents,
+	}
+	nodes.ensurePageSlots(uint64(fullExtents))
+	nodes.activeExtentIndex = nodes.firstAllocExtentIndex(0)
+	b.Cleanup(func() {
+		if err := nodes.Close(); err != nil {
+			b.Fatal(err)
+		}
+	})
+	return nodes
+}
+
+func newFakeMmapNodeStoreAllocBench(fullExtents int) *mmapNodeStore {
+	extents := make([]*mmapNodeExtent, fullExtents+1)
+	for id := range extents {
+		extent := &mmapNodeExtent{
+			id:   uint64(id),
+			data: make([]byte, mmapNodePageSize*3),
+		}
+		if id < fullExtents {
+			extent.setLiveSlots(mmapNodeSlotsPerExtent)
+		}
+		extents[id] = extent
+	}
+	nodes := &mmapNodeStore{
+		extents:           extents,
+		activeExtentIndex: fullExtents,
+	}
+	nodes.ensurePageSlots(uint64(fullExtents))
+	return nodes
+}
+
+func markMmapNodeExtentFullForBench(extent *mmapNodeExtent) {
+	bitmap := extent.bitmap()
+	for byteIndex := range bitmap {
+		bitmap[byteIndex] = bitsetByteMask(byteIndex, mmapNodeSlotsPerExtent)
+	}
+	extent.setLiveSlots(mmapNodeSlotsPerExtent)
 }

@@ -3,6 +3,7 @@
 package minweight_store
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -410,7 +411,7 @@ func (s *mmapWALRecordStore) initHeader() {
 }
 
 func (s *mmapWALRecordStore) loadHeader() error {
-	if string(s.data[:8]) != string(walHeaderMagic[:]) {
+	if !bytes.Equal(s.data[:8], walHeaderMagic[:]) {
 		return ErrCorruptWAL
 	}
 	if version := binary.LittleEndian.Uint32(s.data[walHeaderVersionOffset : walHeaderVersionOffset+4]); version != walVersion {

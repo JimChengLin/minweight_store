@@ -217,6 +217,7 @@ func (s *Store) Close() error {
 	}
 
 	backend := s.backend
+	manifest := s.manifest
 	s.backend = nil
 	s.manifest = nil
 	s.records = nil
@@ -230,6 +231,11 @@ func (s *Store) Close() error {
 	}
 	if closeErr != nil {
 		firstErr = errors.Join(firstErr, closeErr)
+	}
+	if manifest != nil {
+		if err := manifest.close(); err != nil {
+			firstErr = errors.Join(firstErr, err)
+		}
 	}
 	return firstErr
 }

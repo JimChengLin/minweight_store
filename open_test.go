@@ -102,10 +102,15 @@ func TestOpenGracefulShutdownSkipsReplay(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, manifestName)); err != nil {
 		t.Fatal(err)
 	}
-	state, hasLegalManifest, err := (&manifest{path: filepath.Join(dir, manifestName)}).read()
+	manifest, state, hasLegalManifest, err := openManifest(filepath.Join(dir, manifestName))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if err := manifest.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
 	if !hasLegalManifest {
 		t.Fatal("manifest is missing after graceful shutdown")
 	}
@@ -187,7 +192,7 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 		t.Fatalf("active WAL file no = %d, want %d", store.records.activeFileNo, firstWALSegmentNo+2)
 	}
 
-	state, hasLegalManifest, err := store.manifest.read()
+	state, hasLegalManifest, err := readManifest(store.manifest.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +285,7 @@ func TestOpenPrimaryWALFlushedManifestTrustsPrimary(t *testing.T) {
 	}
 	assertGet(t, store, "alpha", "one")
 	assertGet(t, store, "bravo", "two")
-	state, hasLegalManifest, err := store.manifest.read()
+	state, hasLegalManifest, err := readManifest(store.manifest.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +344,7 @@ func TestOpenPrimaryWALFlushedManifestAfterSecondaryReplayTrustsPrimary(t *testi
 	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
 	assertGet(t, store, "bravo", "two")
-	state, hasLegalManifest, err := store.manifest.read()
+	state, hasLegalManifest, err := readManifest(store.manifest.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,10 +810,17 @@ func dirtySyncAndCloseStoreForTest(t *testing.T, store *Store) {
 	t.Helper()
 
 	backend := store.backend
+	manifest := store.manifest
 	store.records = nil
+	store.manifest = nil
 	store.backend = nil
 	if err := backend.syncAndClose(); err != nil {
 		t.Fatal(err)
+	}
+	if manifest != nil {
+		if err := manifest.close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

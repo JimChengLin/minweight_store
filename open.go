@@ -35,12 +35,17 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	manifest := &manifest{path: filepath.Join(dir, manifestName)}
-
-	state, hasLegalManifest, err := manifest.read()
+	manifest, state, hasLegalManifest, err := openManifest(filepath.Join(dir, manifestName))
 	if err != nil {
 		return nil, err
 	}
+	manifestOwnedByStore := false
+	defer func() {
+		if !manifestOwnedByStore {
+			_ = manifest.close()
+		}
+	}()
+
 	var opened openedStoreParts
 	if hasLegalManifest {
 		if !customWALSize {
@@ -67,6 +72,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 		}
 	}
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
+	manifestOwnedByStore = true
 	return &Store{
 		backend:             opened.backend,
 		manifest:            manifest,

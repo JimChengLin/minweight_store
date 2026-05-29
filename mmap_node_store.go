@@ -33,9 +33,10 @@ var mmapNodeMetaMagic = [8]byte{'M', 'W', 'N', 'O', 'D', 'E', '0', '1'}
 
 // Extent layout: page 0 meta, page 1 allocation bitmap, pages 2..4095 nodes.
 type mmapNodeStore struct {
-	dir     string
-	extents []*mmapNodeExtent
-	pages   []*minpatricia.NodePage
+	dir               string
+	extents           []*mmapNodeExtent
+	activeExtentIndex int
+	pages             []*minpatricia.NodePage
 	// Extent create/delete changes directory entries; batching the directory
 	// fsync at Sync/Close avoids one expensive fsync per new extent.
 	dirDirty bool
@@ -73,6 +74,7 @@ func openMmapNodeStore(dir string) (*mmapNodeStore, error) {
 		store.dirDirty = true
 	}
 	store.rebuildPageIndex()
+	store.activeExtentIndex = store.firstAllocExtentIndex(0)
 	if store.extents[0] == nil || store.pages[0] == nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("minweight_store: mmap node root is not allocated")
@@ -129,7 +131,13 @@ func (s *mmapNodeStore) Get(id uint64) (*minpatricia.NodePage, error) {
 }
 
 func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
-	for extentID, extent := range s.extents {
+	for {
+		extentID := s.firstAllocExtentIndex(s.activeExtentIndex)
+		if extentID == len(s.extents) {
+			s.extents = append(s.extents, nil)
+		}
+
+		extent := s.extents[extentID]
 		if extent == nil {
 			id := uint64(extentID) * mmapNodeSlotsPerExtent
 			if id&minpatriciaHandleTag != 0 {
@@ -139,44 +147,44 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 			if err != nil {
 				return 0, nil, err
 			}
-			s.extents[extentID] = extent
-			s.dirDirty = true
 			extent.setUsed(0, true)
 			extent.setLiveSlots(1)
 			page := extent.page(0)
+			s.extents[extentID] = extent
+			s.dirDirty = true
 			s.setPage(id, page)
+			s.activeExtentIndex = extentID
 			return id, page, nil
 		}
-		if extent.liveSlots() == mmapNodeSlotsPerExtent {
-			continue
-		}
+
 		id, page, ok := extent.alloc()
 		if !ok {
+			s.activeExtentIndex = s.firstAllocExtentIndex(extentID + 1)
 			continue
 		}
 		if id&minpatriciaHandleTag != 0 {
 			return 0, nil, minpatricia.ErrPositionTag
 		}
 		s.setPage(id, page)
+		s.activeExtentIndex = extentID
+		if extent.liveSlots() == mmapNodeSlotsPerExtent {
+			s.activeExtentIndex = s.firstAllocExtentIndex(extentID + 1)
+		}
 		return id, page, nil
 	}
+}
 
-	extentID := uint64(len(s.extents))
-	id := extentID * mmapNodeSlotsPerExtent
-	if id&minpatriciaHandleTag != 0 {
-		return 0, nil, minpatricia.ErrPositionTag
+func (s *mmapNodeStore) firstAllocExtentIndex(start int) int {
+	if start < 0 {
+		start = 0
 	}
-	extent, err := createMmapNodeExtent(s.dir, extentID)
-	if err != nil {
-		return 0, nil, err
+	for extentID := start; extentID < len(s.extents); extentID++ {
+		extent := s.extents[extentID]
+		if extent == nil || extent.liveSlots() < mmapNodeSlotsPerExtent {
+			return extentID
+		}
 	}
-	s.extents = append(s.extents, extent)
-	s.dirDirty = true
-	extent.setUsed(0, true)
-	extent.setLiveSlots(1)
-	page := extent.page(0)
-	s.setPage(id, page)
-	return id, page, nil
+	return len(s.extents)
 }
 
 func (s *mmapNodeStore) Free(id uint64) error {
@@ -193,6 +201,10 @@ func (s *mmapNodeStore) Free(id uint64) error {
 	extent.setUsed(slot, false)
 	extent.setLiveSlots(extent.liveSlots() - 1)
 	s.setPage(id, nil)
+	extentID := int(id / mmapNodeSlotsPerExtent)
+	if extentID < s.activeExtentIndex {
+		s.activeExtentIndex = extentID
+	}
 	if extent.liveSlots() == 0 {
 		return s.releaseFreeExtents()
 	}
@@ -289,6 +301,7 @@ func (s *mmapNodeStore) Close() error {
 		s.dirDirty = false
 	}
 	s.extents = nil
+	s.activeExtentIndex = 0
 	return firstErr
 }
 
@@ -303,6 +316,7 @@ func (s *mmapNodeStore) closeAfterSync() error {
 		}
 	}
 	s.extents = nil
+	s.activeExtentIndex = 0
 	return firstErr
 }
 
@@ -329,6 +343,7 @@ func (s *mmapNodeStore) Reset() error {
 	root.setLiveSlots(1)
 	clear(mmapNodePageBytes(root.page(0)))
 	s.rebuildPageIndex()
+	s.activeExtentIndex = s.firstAllocExtentIndex(0)
 	return nil
 }
 
@@ -409,6 +424,7 @@ func (s *mmapNodeStore) releaseFreeExtents() error {
 		}
 	}
 	s.trimReleasedExtents()
+	s.activeExtentIndex = s.firstAllocExtentIndex(0)
 	return nil
 }
 
@@ -419,6 +435,9 @@ func (s *mmapNodeStore) trimReleasedExtents() {
 	maxPages := len(s.extents) * mmapNodeSlotsPerExtent
 	if len(s.pages) > maxPages {
 		s.pages = s.pages[:maxPages]
+	}
+	if s.activeExtentIndex > len(s.extents) {
+		s.activeExtentIndex = len(s.extents)
 	}
 }
 

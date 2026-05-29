@@ -57,10 +57,15 @@ func TestManifestCompactsWhenFull(t *testing.T) {
 
 func TestManifestObjectWriteUsesCachedLatestRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manifestName)
-	m := &manifest{path: path}
-	if _, ok, err := m.read(); err != nil || ok {
-		t.Fatalf("manifest.read absent = ok %v err %v, want false,nil", ok, err)
+	m, _, ok, err := openManifest(path)
+	if err != nil || ok {
+		t.Fatalf("openManifest absent = ok %v err %v, want false,nil", ok, err)
 	}
+	defer func() {
+		if err := m.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
 
 	first := testManifestState(1)
 	if err := m.write(first); err != nil {
