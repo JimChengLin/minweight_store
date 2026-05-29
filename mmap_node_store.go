@@ -611,41 +611,21 @@ func (e *mmapNodeExtent) sync() error {
 	if err := msyncMmap(e.data); err != nil {
 		return err
 	}
-	return e.syncMetadata()
+	if e.metadataDirty {
+		if err := syncMmapFileMetadata(e.file); err != nil {
+			return err
+		}
+		e.metadataDirty = false
+	}
+	return nil
 }
 
 func (e *mmapNodeExtent) close() error {
-	var firstErr error
-	if e.data != nil {
-		if err := msyncMmap(e.data); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := syscall.Munmap(e.data); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		e.data = nil
-	}
-	if e.file != nil {
-		if err := e.syncMetadata(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := e.file.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		e.file = nil
+	firstErr := e.sync()
+	if err := e.closeAfterSync(); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
-}
-
-func (e *mmapNodeExtent) syncMetadata() error {
-	if !e.metadataDirty {
-		return nil
-	}
-	if err := syncMmapFileMetadata(e.file); err != nil {
-		return err
-	}
-	e.metadataDirty = false
-	return nil
 }
 
 func (e *mmapNodeExtent) closeAfterSync() error {
