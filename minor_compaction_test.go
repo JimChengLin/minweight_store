@@ -236,6 +236,87 @@ func TestMinorCompactCompactsMultipleCandidates(t *testing.T) {
 	}
 }
 
+func TestMinorCompactMultipleWALFlushReopen(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{
+		WALSize: crashTestWALSize,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.stopMinorCompactionDispatcher()
+
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	for fileNo := uint64(firstWALSegmentNo); fileNo <= firstWALSegmentNo+2; fileNo++ {
+		if !walFileExistsForTest(t, dir, fileNo) {
+			t.Fatalf("source WAL %d deleted before install_sst checkpoint", fileNo)
+		}
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	for fileNo := uint64(firstWALSegmentNo); fileNo <= firstWALSegmentNo+2; fileNo++ {
+		if walFileExistsForTest(t, dir, fileNo) {
+			t.Fatalf("source WAL %d still exists after install_sst checkpoint", fileNo)
+		}
+	}
+	assertGet(t, store, "alpha", "three")
+	assertGet(t, store, "bravo", "two")
+	assertGet(t, store, "delta", "four")
+	assertIndexNotFileNoForKey(t, store, "alpha", firstWALSegmentNo+2)
+	assertIndexNotFileNoForKey(t, store, "bravo", firstWALSegmentNo+1)
+	assertIndexFileNoForKey(t, store, "delta", firstWALSegmentNo+3)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	assertGet(t, reopened, "alpha", "three")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "delta", "four")
+	assertIndexNotFileNoForKey(t, reopened, "alpha", firstWALSegmentNo+2)
+	assertIndexNotFileNoForKey(t, reopened, "bravo", firstWALSegmentNo+1)
+	assertIndexFileNoForKey(t, reopened, "delta", firstWALSegmentNo+3)
+	for fileNo := uint64(firstWALSegmentNo); fileNo <= firstWALSegmentNo+2; fileNo++ {
+		if walFileExistsForTest(t, dir, fileNo) {
+			t.Fatalf("source WAL %d reappeared after reopen", fileNo)
+		}
+	}
+}
+
 func TestMinorCompactionWorkersCompactCheckpointedWAL(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{
@@ -305,6 +386,12 @@ func TestMinorCompactDeleteOnlyWALPublishesEmptyParquet(t *testing.T) {
 	if _, ok, err := store.Get([]byte("alpha")); err != nil || ok {
 		t.Fatalf("Get(alpha) after delete-only compact ok=%v err=%v, want false,nil", ok, err)
 	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if walFileExistsForTest(t, dir, firstWALSegmentNo+1) {
+		t.Fatal("delete-only source WAL still exists after install_sst checkpoint")
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -347,12 +434,13 @@ func TestMinorCompactInstallSSTReplaysAfterDirtyRestart(t *testing.T) {
 	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
 }
 
-func TestMinorCompactParquetTmpCrashIsIgnored(t *testing.T) {
+func TestMinorCompactParquetTmpCrashIsCleanedOnOpen(t *testing.T) {
 	dir := t.TempDir()
 	store := openMinorCompactionStoreInDirForTest(t, dir)
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	tmpPath := parquetSegmentPath(dir, firstUnallocatedFileNoForTest(t, dir)) + ".tmp"
+	tmpFileNo := firstUnallocatedFileNoForTest(t, dir)
+	tmpPath := parquetSegmentPath(dir, tmpFileNo) + ".tmp"
 	if err := os.WriteFile(tmpPath, []byte("partial parquet"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -367,16 +455,22 @@ func TestMinorCompactParquetTmpCrashIsIgnored(t *testing.T) {
 	defer closeForTest(t, reopened)
 	assertGet(t, reopened, "alpha", "one")
 	assertGet(t, reopened, "bravo", "two")
+	if fileExistsForTest(t, tmpPath) {
+		t.Fatal("tmp parquet still exists after Open")
+	}
 
 	if err := reopened.minorCompact(); err != nil {
 		t.Fatal(err)
 	}
 	parquetFileNo := onlyParquetFileNoForTest(t, reopened)
+	if parquetFileNo != tmpFileNo {
+		t.Fatalf("minor compact parquet fileNo = %d, want reused tmp fileNo %d", parquetFileNo, tmpFileNo)
+	}
 	assertIndexFileNoForKey(t, reopened, "alpha", parquetFileNo)
 	assertIndexFileNoForKey(t, reopened, "bravo", parquetFileNo)
 }
 
-func TestMinorCompactParquetWithoutInstallSSTIsIgnoredAndReused(t *testing.T) {
+func TestMinorCompactParquetWithoutInstallSSTIsCleanedAndReused(t *testing.T) {
 	dir := t.TempDir()
 	store := openMinorCompactionStoreInDirForTest(t, dir)
 	orphanFileNo, _ := buildParquetFromWALForTest(t, store, firstWALSegmentNo)
@@ -393,6 +487,9 @@ func TestMinorCompactParquetWithoutInstallSSTIsIgnoredAndReused(t *testing.T) {
 	if got := parquetFileNosForTest(reopened); len(got) != 0 {
 		t.Fatalf("opened parquet segments = %v, want none before install_sst", got)
 	}
+	if fileExistsForTest(t, parquetSegmentPath(dir, orphanFileNo)) {
+		t.Fatal("uninstalled parquet still exists after Open")
+	}
 	assertIndexFileNoForKey(t, reopened, "alpha", firstWALSegmentNo)
 
 	if err := reopened.minorCompact(); err != nil {
@@ -403,6 +500,63 @@ func TestMinorCompactParquetWithoutInstallSSTIsIgnoredAndReused(t *testing.T) {
 	}
 	assertIndexFileNoForKey(t, reopened, "alpha", orphanFileNo)
 	assertIndexFileNoForKey(t, reopened, "bravo", orphanFileNo)
+}
+
+func TestMinorCompactUninstalledParquetCleanupAllowsWALRollover(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+	orphanFileNo, _ := buildParquetFromWALForTest(t, store, firstWALSegmentNo)
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	if fileExistsForTest(t, parquetSegmentPath(dir, orphanFileNo)) {
+		t.Fatal("uninstalled parquet still exists after Open")
+	}
+	if err := reopened.Put([]byte("echo"), []byte("five")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !walFileExistsForTest(t, dir, orphanFileNo) {
+		t.Fatalf("WAL %d was not created after orphan parquet cleanup", orphanFileNo)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err = Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+	assertGet(t, reopened, "echo", "five")
+}
+
+func TestMinorCompactWALAndSSTSameFileNoFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+	parquetStore, err := createParquetRecordStore(parquetSegmentPath(dir, firstWALSegmentNo), firstWALSegmentNo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parquetStore.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parquetStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	_, err = Open(dir, Options{WALSize: crashTestWALSize})
+	if !errors.Is(err, ErrManifest) {
+		t.Fatalf("Open with WAL/SST fileNo collision err = %v, want %v", err, ErrManifest)
+	}
 }
 
 func TestMinorCompactInstallSSTWALReplaysBeforeRuntimeRetarget(t *testing.T) {
@@ -495,6 +649,41 @@ func TestMinorCompactCorruptInstallSSTReplayPolicy(t *testing.T) {
 		assertIndexFileNoForKey(t, store, "alpha", firstWALSegmentNo)
 		assertIndexFileNoForKey(t, store, "bravo", firstWALSegmentNo)
 	})
+}
+
+func TestMinorCompactPointInTimeCleanupPreventsParquetWALFileNoCollision(t *testing.T) {
+	dir := compactWithCorruptInstallSSTForTest(t)
+	orphanFileNo := firstUnallocatedFileNoForTest(t, dir)
+
+	store, err := Open(dir, Options{
+		WALSize:         crashTestWALSize,
+		WALReplayPolicy: WALReplayPointInTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.stopMinorCompactionDispatcher()
+	if fileExistsForTest(t, parquetSegmentPath(dir, orphanFileNo)) {
+		t.Fatalf("orphan parquet %d still exists after point-in-time recovery", orphanFileNo)
+	}
+	if !walFileExistsForTest(t, dir, orphanFileNo) {
+		t.Fatalf("WAL %d was not created after orphan parquet cleanup", orphanFileNo)
+	}
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	assertIndexFileNoForKey(t, store, "alpha", firstWALSegmentNo)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
 }
 
 func TestMinorCompactInstallSSTMissingParquetFailsFast(t *testing.T) {
@@ -663,6 +852,20 @@ func assertIndexFileNoForKey(t *testing.T, store *Store, key string, want uint64
 	}
 }
 
+func assertIndexNotFileNoForKey(t *testing.T, store *Store, key string, old uint64) {
+	t.Helper()
+
+	store.primaryMu.RLock()
+	defer store.primaryMu.RUnlock()
+	pos, ok, err := store.backend.index.Get([]byte(key))
+	if err != nil || !ok {
+		t.Fatalf("index.Get(%s) = (%d,%v,%v), want position,true,nil", key, pos, ok, err)
+	}
+	if got := recordPositionFileNo(pos); got == old {
+		t.Fatalf("index fileNo for %s = %d, want different fileNo", key, got)
+	}
+}
+
 func waitForIndexFileNoChangeForTest(t *testing.T, store *Store, key string, old uint64) {
 	t.Helper()
 
@@ -820,7 +1023,13 @@ func assertDirEntrySuffixes(t *testing.T, dir, suffix string) {
 func walFileExistsForTest(t *testing.T, dir string, fileNo uint64) bool {
 	t.Helper()
 
-	_, err := os.Stat(filepath.Join(walSegmentsPath(dir), walSegmentName(fileNo)))
+	return fileExistsForTest(t, filepath.Join(walSegmentsPath(dir), walSegmentName(fileNo)))
+}
+
+func fileExistsForTest(t *testing.T, path string) bool {
+	t.Helper()
+
+	_, err := os.Stat(path)
 	if err == nil {
 		return true
 	}

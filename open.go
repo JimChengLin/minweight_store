@@ -82,6 +82,10 @@ func Open(dir string, options ...Options) (*Store, error) {
 			_ = records.Close()
 			return nil, err
 		}
+		if err := opened.records.cleanupStartupParquetSegments(state.nextFileNo); err != nil {
+			_ = opened.backend.close()
+			return nil, err
+		}
 	} else {
 		opened, err = rebuildFromWAL(dir, cfg.WALSize, cfg.WALReplayPolicy)
 		if err != nil {
@@ -89,7 +93,6 @@ func Open(dir string, options ...Options) (*Store, error) {
 		}
 	}
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
-	manifestOwnedByStore = true
 	store := &Store{
 		backend:                  opened.backend,
 		manifest:                 manifest,
@@ -98,6 +101,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 		minorCompactionThreadNum: cfg.MinorCompactionThreadNum,
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
 	}
+	manifestOwnedByStore = true
 	store.startMinorCompactionDispatcher()
 	return store, nil
 }

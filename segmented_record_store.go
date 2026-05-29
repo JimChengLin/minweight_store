@@ -21,6 +21,7 @@ const (
 	sstDirName           = "sst"
 	walSegmentSuffix     = ".wal"
 	parquetSegmentSuffix = ".parquet"
+	parquetTempSuffix    = parquetSegmentSuffix + ".tmp"
 	firstWALSegmentNo    = 1
 )
 
@@ -461,6 +462,56 @@ func (s *segmentedRecordStore) openParquetSegments() error {
 		s.segments[id] = store
 	}
 	return nil
+}
+
+func (s *segmentedRecordStore) cleanupStartupParquetSegments(nextFileNo uint64) error {
+	sstDir := sstSegmentsPath(s.rootDir)
+	entries, err := os.ReadDir(sstDir)
+	if err != nil {
+		return err
+	}
+	removed := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		path := filepath.Join(sstDir, name)
+		if strings.HasSuffix(name, parquetTempSuffix) {
+			baseName := strings.TrimSuffix(name, ".tmp")
+			if _, err := parseRecordSegmentID(baseName, parquetSegmentSuffix); err != nil {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			removed = true
+			continue
+		}
+		if !strings.HasSuffix(name, parquetSegmentSuffix) {
+			continue
+		}
+		fileNo, err := parseRecordSegmentID(name, parquetSegmentSuffix)
+		if err != nil {
+			return err
+		}
+		if fileNo < nextFileNo {
+			continue
+		}
+		// Dirty tail replay can install an SST whose fileNo was allocated after
+		// the last manifest commit. It is live once replay opened it.
+		if _, ok := s.segments[fileNo].(*parquetRecordStore); ok {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		removed = true
+	}
+	if !removed {
+		return nil
+	}
+	return syncDir(sstDir)
 }
 
 func walSegmentOpenSize(path string, configuredSize int64) (int64, bool, error) {
