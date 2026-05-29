@@ -21,12 +21,7 @@ func (s *Store) minorCompact() error {
 	defer s.compactionMu.RUnlock()
 
 	s.primaryMu.RLock()
-	if s.backend == nil {
-		s.primaryMu.RUnlock()
-		return ErrClosed
-	}
-	if s.fatal != nil {
-		err := s.fatal
+	if _, err := s.openBackend(); err != nil {
 		s.primaryMu.RUnlock()
 		return err
 	}
@@ -70,6 +65,7 @@ func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {
 		}
 	}()
 
+	liveCandidates := candidates[:0]
 	for _, candidate := range candidates {
 		current, ok, err := s.currentIndexPosition(candidate.key)
 		if err != nil {
@@ -78,18 +74,27 @@ func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {
 		if !ok || current != candidate.pos {
 			continue
 		}
-		value, ok := s.records.Value(candidate.pos)
-		if !ok {
-			return false, ErrRecord
-		}
+		liveCandidates = append(liveCandidates, candidate)
+	}
+
+	for i, candidate := range liveCandidates {
 		if parquetStore == nil {
 			parquetStore, err = s.records.createParquetSegment()
 			if err != nil {
 				return false, err
 			}
 		}
-		if _, err := parquetStore.Append(candidate.key, value); err != nil {
+		value, ok := s.records.Value(candidate.pos)
+		if !ok {
+			return false, ErrCorruptWAL
+		}
+		newPos, err := parquetStore.Append(candidate.key, value)
+		if err != nil {
 			return false, err
+		}
+		fileNo, rowIndex, ok := parseParquetRecordPosition(newPos)
+		if !ok || fileNo != parquetStore.fileNo || rowIndex != uint64(i) {
+			return false, ErrParquet
 		}
 	}
 	if parquetStore == nil {
@@ -105,7 +110,7 @@ func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {
 		return false, err
 	}
 	parquetOwnedByRecords = true
-	if err := s.publishInstalledSST(sourceWALFileNo, parquetStore.fileNo); err != nil {
+	if err := s.publishInstalledSST(sourceWALFileNo, parquetStore.fileNo, liveCandidates); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -118,16 +123,17 @@ func sortedWALPutCompactionCandidates(records *segmentedRecordStore, sourceWALFi
 		if op == walOpPut || op == walOpDelete {
 			hasKVRecord = true
 		}
-		if op == walOpDelete || op == walOpInstallSST {
+		switch op {
+		case walOpPut:
+			candidates = append(candidates, walCompactionCandidate{
+				key: key,
+				pos: pos,
+			})
+		case walOpDelete, walOpInstallSST:
 			return nil
-		}
-		if op != walOpPut {
+		default:
 			return ErrCorruptWAL
 		}
-		candidates = append(candidates, walCompactionCandidate{
-			key: key,
-			pos: pos,
-		})
 		return nil
 	}); err != nil {
 		return nil, false, err
@@ -142,21 +148,22 @@ func (s *Store) currentIndexPosition(key []byte) (minpatricia.Position, bool, er
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 
-	if s.fatal != nil {
-		return 0, false, s.fatal
+	backend, err := s.openBackend()
+	if err != nil {
+		return 0, false, err
 	}
-	return s.backend.index.Get(key)
+	return backend.index.Probe(key)
 }
 
-func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64) error {
+func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64, entries []walCompactionCandidate) error {
 	for {
 		s.primaryMu.Lock()
-		if s.fatal != nil {
-			err := s.fatal
+		backend, err := s.openBackend()
+		if err != nil {
 			s.primaryMu.Unlock()
 			return err
 		}
-		_, err := s.records.AppendInstallSSTRecord(sourceWALFileNo, sstFileNo)
+		_, err = s.records.AppendInstallSSTRecord(sourceWALFileNo, sstFileNo)
 		walFull := errors.Is(err, ErrWalFull)
 		canFlush := false
 		if walFull {
@@ -164,7 +171,7 @@ func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64) error {
 			canFlush = active != nil && active.used != walHeaderSize
 		}
 		if err == nil {
-			err = installSSTIntoIndex(s.records, s.backend.index, sourceWALFileNo, sstFileNo)
+			err = retargetInstalledSSTEntries(s.records, backend.index, sstFileNo, entries)
 		}
 		if err != nil && !walFull {
 			s.fatal = errors.Join(ErrFatal, err)
@@ -183,6 +190,36 @@ func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64) error {
 		}
 		return err
 	}
+}
+
+func retargetInstalledSSTEntries(records *segmentedRecordStore, index *minpatricia.Index, sstFileNo uint64, entries []walCompactionCandidate) error {
+	for rowIndex, entry := range entries {
+		oldPos, ok, err := index.Probe(entry.key)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if oldPos != entry.pos {
+			continue
+		}
+		newPos, err := makeParquetRecordPosition(sstFileNo, uint64(rowIndex))
+		if err != nil {
+			return err
+		}
+		replacedPos, replaced, err := index.Put(entry.key, newPos)
+		if err != nil {
+			return err
+		}
+		if !replaced || replacedPos != oldPos {
+			return ErrCorruptIndex
+		}
+		if err := records.Free(oldPos); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func installSSTIntoIndex(records *segmentedRecordStore, index *minpatricia.Index, sourceWALFileNo, sstFileNo uint64) error {

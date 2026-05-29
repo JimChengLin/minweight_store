@@ -3,7 +3,7 @@ module github.com/JimChengLin/minweight_store
 go 1.25.1
 
 require (
-	github.com/JimChengLin/minpatricia v0.0.0-20260526075748-1941606a5ac1
+	github.com/JimChengLin/minpatricia v0.0.0-20260529021818-35f2e13b3aad
 	github.com/parquet-go/parquet-go v0.30.1
 	golang.org/x/sys v0.38.0
 )

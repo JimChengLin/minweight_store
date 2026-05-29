@@ -21,11 +21,9 @@ func (s *Store) flushWithSecondaryLocked() error {
 }
 
 func (s *Store) flushWithPrimaryLocked() error {
-	if s.backend == nil {
-		return ErrClosed
-	}
-	if s.fatal != nil {
-		return s.fatal
+	backend, err := s.openBackend()
+	if err != nil {
+		return err
 	}
 	active := s.records.activeSegment()
 	if active.used == walHeaderSize {
@@ -34,7 +32,7 @@ func (s *Store) flushWithPrimaryLocked() error {
 	}
 	checkpointWALFileNo, err := checkpointActiveWAL(
 		s.manifest.dir(),
-		s.backend,
+		backend,
 		s.records,
 		s.manifest,
 		s.checkpointWALFileNo,

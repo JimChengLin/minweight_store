@@ -323,7 +323,7 @@ func (b *indexBackend) verifyReadPosition(key []byte, pos minpatricia.Position) 
 	if !b.verifyIndexOnRead {
 		return nil
 	}
-	got, ok, err := b.index.Get(key)
+	got, ok, err := b.index.Probe(key)
 	if err != nil {
 		return err
 	}

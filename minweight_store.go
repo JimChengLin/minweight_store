@@ -16,7 +16,6 @@ var (
 	ErrFatal        = errors.New("minweight_store: store is fatal")
 	ErrReplayPolicy = errors.New("minweight_store: invalid wal replay policy")
 	ErrManifest     = errors.New("minweight_store: corrupt manifest")
-	ErrRecord       = errors.New("minweight_store: corrupt record store")
 	ErrParquet      = errors.New("minweight_store: invalid parquet record store")
 	ErrOptions      = errors.New("minweight_store: invalid options")
 )
@@ -51,10 +50,11 @@ func (s *Store) Len() int {
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 
-	if s.backend == nil || s.fatal != nil {
+	backend, err := s.openBackend()
+	if err != nil {
 		return 0
 	}
-	return s.backend.len()
+	return backend.len()
 }
 
 func (s *Store) Put(key, value []byte) error {

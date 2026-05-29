@@ -1,7 +1,7 @@
 github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7OputlJIzU=
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
-github.com/JimChengLin/minpatricia v0.0.0-20260526075748-1941606a5ac1 h1:UUm/1qcknIuGf54xXcOS8ad0hE0p3KEWbsJGFCBJXdY=
-github.com/JimChengLin/minpatricia v0.0.0-20260526075748-1941606a5ac1/go.mod h1://K7e702uN+9qcvFJKdBhAfdz67P0bi0FO/TlmOBmf4=
+github.com/JimChengLin/minpatricia v0.0.0-20260529021818-35f2e13b3aad h1:MuaOM3/8b61zve71cyN4j4GhBjVgRI/qcFZ40CmmBIs=
+github.com/JimChengLin/minpatricia v0.0.0-20260529021818-35f2e13b3aad/go.mod h1://K7e702uN+9qcvFJKdBhAfdz67P0bi0FO/TlmOBmf4=
 github.com/alecthomas/assert/v2 v2.10.0 h1:jjRCHsj6hBJhkmhznrCzoNpbA3zqy0fYiUcYZP/GkPY=
 github.com/alecthomas/assert/v2 v2.10.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 github.com/alecthomas/repr v0.4.0 h1:GhI2A8MACjfegCPVq9f1FLvIBS+DrQ2KQBFZP1iFzXc=
