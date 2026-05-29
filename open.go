@@ -90,14 +90,16 @@ func Open(dir string, options ...Options) (*Store, error) {
 	}
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
 	manifestOwnedByStore = true
-	return &Store{
+	store := &Store{
 		backend:                  opened.backend,
 		manifest:                 manifest,
 		records:                  opened.records,
 		checkpointWALFileNo:      opened.checkpointWALFileNo,
 		minorCompactionThreadNum: cfg.MinorCompactionThreadNum,
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
-	}, nil
+	}
+	store.startMinorCompactionDispatcher()
+	return store, nil
 }
 
 func defaultOptions() Options {

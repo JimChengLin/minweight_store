@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -189,7 +190,7 @@ func (s *segmentedRecordStore) Close() error {
 	s.segments = nil
 	s.active = nil
 	s.activeFileNo = 0
-	s.nextFileNo = 0
+	atomic.StoreUint64(&s.nextFileNo, 0)
 	return firstErr
 }
 
@@ -206,7 +207,7 @@ func (s *segmentedRecordStore) closeAfterSync() error {
 	s.segments = nil
 	s.active = nil
 	s.activeFileNo = 0
-	s.nextFileNo = 0
+	atomic.StoreUint64(&s.nextFileNo, 0)
 	return firstErr
 }
 
@@ -214,7 +215,7 @@ func (s *segmentedRecordStore) Rollover() (*mmapWALRecordStore, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	newFileNo := s.nextFileNo
+	newFileNo := atomic.LoadUint64(&s.nextFileNo)
 	old := s.active
 	if old == nil {
 		return nil, ErrClosed
@@ -228,7 +229,7 @@ func (s *segmentedRecordStore) Rollover() (*mmapWALRecordStore, error) {
 	s.segments[newFileNo] = wal
 	s.active = wal
 	s.activeFileNo = newFileNo
-	s.nextFileNo = newFileNo + 1
+	atomic.StoreUint64(&s.nextFileNo, newFileNo+1)
 	s.walDirDirty = true
 	return old, nil
 }
@@ -251,12 +252,12 @@ func (s *segmentedRecordStore) repairWALBestEffort(fileNo uint64) (bool, error) 
 
 func (s *segmentedRecordStore) createParquetSegment() (*parquetRecordStore, error) {
 	s.mu.Lock()
-	fileNo := s.nextFileNo
+	fileNo := atomic.LoadUint64(&s.nextFileNo)
 	if s.segments[fileNo] != nil {
 		s.mu.Unlock()
 		return nil, ErrManifest
 	}
-	s.nextFileNo++
+	atomic.StoreUint64(&s.nextFileNo, fileNo+1)
 	s.mu.Unlock()
 
 	return createParquetRecordStore(parquetSegmentPath(s.rootDir, fileNo), fileNo)
@@ -304,8 +305,8 @@ func (s *segmentedRecordStore) parquetSegment(fileNo uint64) (*parquetRecordStor
 	s.segments[fileNo] = store
 	// WAL replay can install a parquet created after the last manifest commit,
 	// so advance the allocator past that recovered file number.
-	if s.nextFileNo <= fileNo {
-		s.nextFileNo = fileNo + 1
+	if atomic.LoadUint64(&s.nextFileNo) <= fileNo {
+		atomic.StoreUint64(&s.nextFileNo, fileNo+1)
 	}
 	storeOwnedByMap = true
 	return store, nil
@@ -379,7 +380,7 @@ func (s *segmentedRecordStore) openParquetSegments() error {
 		return err
 	}
 	for _, id := range ids {
-		if id >= s.nextFileNo {
+		if id >= atomic.LoadUint64(&s.nextFileNo) {
 			continue
 		}
 		if s.segments[id] != nil {

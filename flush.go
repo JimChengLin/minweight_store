@@ -4,6 +4,7 @@ package minweight_store
 
 import (
 	"os"
+	"sync/atomic"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -46,15 +47,15 @@ func (s *Store) flushWithPrimaryLocked() error {
 }
 
 func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRecordStore, manifest *manifest, checkpointWALFileNo uint64, policy WALReplayPolicy) (uint64, error) {
-	oldWALFileNo := records.activeFileNo
 	oldWAL, err := records.Rollover()
 	if err != nil {
 		return 0, err
 	}
+	oldWALFileNo := oldWAL.fileNo
 	state := manifestState{
 		checkpointWALFileNo: oldWALFileNo,
 		activeWALFileNo:     records.activeFileNo,
-		nextFileNo:          records.nextFileNo,
+		nextFileNo:          atomic.LoadUint64(&records.nextFileNo),
 		walSegmentSize:      uint64(records.size),
 		primaryWALFlushed:   true,
 	}

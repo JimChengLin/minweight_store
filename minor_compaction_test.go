@@ -54,6 +54,81 @@ func TestMinorCompactMemoryStoreNoop(t *testing.T) {
 	}
 }
 
+func TestMinorCompactCompactsMultipleCandidates(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{
+		WALSize:                  crashTestWALSize,
+		MinorCompactionThreadNum: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.stopMinorCompactionDispatcher()
+	defer closeForTest(t, store)
+
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	waitForIndexFileNoChangeForTest(t, store, "alpha", firstWALSegmentNo)
+	waitForIndexFileNoChangeForTest(t, store, "charlie", firstWALSegmentNo+1)
+	assertIndexFileNoForKey(t, store, "delta", firstWALSegmentNo+2)
+	if got := len(parquetFileNosForTest(store)); got != 2 {
+		t.Fatalf("parquet segment count = %d, want 2", got)
+	}
+}
+
+func TestMinorCompactionWorkersCompactCheckpointedWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{
+		WALSize:                  crashTestWALSize,
+		MinorCompactionThreadNum: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForIndexFileNoChangeForTest(t, store, "alpha", firstWALSegmentNo)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	assertGet(t, store, "charlie", "three")
+}
+
 func TestMinorCompactDeleteOnlyWALPublishesEmptyParquet(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{
@@ -63,6 +138,7 @@ func TestMinorCompactDeleteOnlyWALPublishesEmptyParquet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.stopMinorCompactionDispatcher()
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
@@ -142,12 +218,12 @@ func TestMinorCompactParquetTmpCrashIsIgnored(t *testing.T) {
 	}
 
 	reopened, err := Open(dir, Options{
-		WALSize:            crashTestWALSize,
-		MaxImmutableWALNum: 0,
+		WALSize: crashTestWALSize,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopened.stopMinorCompactionDispatcher()
 	defer closeForTest(t, reopened)
 	assertGet(t, reopened, "alpha", "one")
 	assertGet(t, reopened, "bravo", "two")
@@ -167,12 +243,12 @@ func TestMinorCompactParquetWithoutInstallSSTIsIgnoredAndReused(t *testing.T) {
 	dirtySyncAndCloseStoreForTest(t, store)
 
 	reopened, err := Open(dir, Options{
-		WALSize:            crashTestWALSize,
-		MaxImmutableWALNum: 0,
+		WALSize: crashTestWALSize,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopened.stopMinorCompactionDispatcher()
 	defer closeForTest(t, reopened)
 	if got := parquetFileNosForTest(reopened); len(got) != 0 {
 		t.Fatalf("opened parquet segments = %v, want none before install_sst", got)
@@ -370,6 +446,7 @@ func openMinorCompactionStoreInDirForTest(t *testing.T, dir string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.stopMinorCompactionDispatcher()
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +521,25 @@ func assertIndexFileNoForKey(t *testing.T, store *Store, key string, want uint64
 	if got := recordPositionFileNo(pos); got != want {
 		t.Fatalf("index fileNo for %s = %d, want %d", key, got, want)
 	}
+}
+
+func waitForIndexFileNoChangeForTest(t *testing.T, store *Store, key string, old uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		store.primaryMu.RLock()
+		pos, ok, err := store.backend.index.Get([]byte(key))
+		store.primaryMu.RUnlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok && recordPositionFileNo(pos) != old {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("index fileNo for %s did not change from %d", key, old)
 }
 
 func firstUnallocatedFileNoForTest(t *testing.T, dir string) uint64 {

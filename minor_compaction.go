@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sort"
+	"sync"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -20,32 +21,70 @@ func (s *Store) minorCompact() error {
 	s.compactionMu.RLock()
 	defer s.compactionMu.RUnlock()
 
-	s.primaryMu.RLock()
-	if _, err := s.openBackend(); err != nil {
-		s.primaryMu.RUnlock()
+	candidates, err := s.minorCompactionCandidates()
+	if err != nil {
 		return err
 	}
-	if s.records == nil && s.manifest == nil {
-		s.primaryMu.RUnlock()
+	if len(candidates) == 0 {
 		return nil
 	}
-	if s.records == nil || s.manifest == nil {
-		s.primaryMu.RUnlock()
-		return ErrManifest
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	candidates := s.records.compactableWALFileNos(s.checkpointWALFileNo, s.maxImmutableWALNum)
-	s.primaryMu.RUnlock()
-
+	hasErr := func() bool {
+		errMu.Lock()
+		defer errMu.Unlock()
+		return firstErr != nil
+	}
+	sem := make(chan struct{}, s.minorCompactionThreadNum)
 	for _, fileNo := range candidates {
-		compacted, err := s.minorCompactWAL(fileNo)
-		if err != nil {
-			return err
+		if hasErr() {
+			break
 		}
-		if compacted {
-			return nil
-		}
+		sem <- struct{}{}
+
+		wg.Add(1)
+		go func(fileNo uint64) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+
+			_, err := s.minorCompactWAL(fileNo)
+			if err == nil {
+				return
+			}
+			setErr(err)
+		}(fileNo)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
 	}
 	return nil
+}
+
+func (s *Store) minorCompactionCandidates() ([]uint64, error) {
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
+
+	if _, err := s.openBackend(); err != nil {
+		return nil, err
+	}
+	if s.records == nil && s.manifest == nil {
+		return nil, nil
+	}
+	if s.records == nil || s.manifest == nil {
+		return nil, ErrManifest
+	}
+	return s.records.compactableWALFileNos(s.checkpointWALFileNo, s.maxImmutableWALNum), nil
 }
 
 func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {

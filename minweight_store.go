@@ -30,6 +30,7 @@ type Store struct {
 	checkpointWALFileNo      uint64
 	minorCompactionThreadNum int
 	maxImmutableWALNum       int
+	minorCompaction          *minorCompactionDispatcher
 	fatal                    error
 }
 
@@ -201,6 +202,8 @@ func (s *Store) SeekLE(key []byte) (Item, bool, error) {
 }
 
 func (s *Store) Close() error {
+	s.stopMinorCompactionDispatcher()
+
 	s.compactionMu.Lock()
 	defer s.compactionMu.Unlock()
 
@@ -262,7 +265,11 @@ func (s *Store) flush() error {
 	s.secondaryIndexMu.Lock()
 	defer s.secondaryIndexMu.Unlock()
 
-	return s.flushWithSecondaryLocked()
+	err := s.flushWithSecondaryLocked()
+	if err == nil {
+		s.notifyMinorCompaction()
+	}
+	return err
 }
 
 func (s *Store) mayMarkFatal(err error) error {

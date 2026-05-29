@@ -104,7 +104,12 @@ func reopenCrashTestStore(t *testing.T, dir string, expected map[string]string) 
 }
 
 func activeWALHasRecords(store *Store) bool {
-	if store == nil || store.records == nil {
+	if store == nil {
+		return false
+	}
+	store.primaryMu.RLock()
+	defer store.primaryMu.RUnlock()
+	if store.records == nil {
 		return false
 	}
 	active := store.records.activeSegment()
