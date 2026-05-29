@@ -10,13 +10,21 @@ import (
 )
 
 type Options struct {
-	WALSize           int64
-	WALReplayPolicy   WALReplayPolicy
-	VerifyIndexOnRead bool
+	WALSize                  int64
+	WALReplayPolicy          WALReplayPolicy
+	VerifyIndexOnRead        bool
+	MinorCompactionThreadNum int
+	MaxImmutableWALNum       int
 }
 
+const (
+	defaultWALSize                  int64 = 128 * 1024 * 1024
+	defaultMinorCompactionThreadNum       = 1
+	defaultMaxImmutableWALNum             = 1
+)
+
 func Open(dir string, options ...Options) (*Store, error) {
-	cfg := Options{WALSize: defaultWALSize}
+	cfg := defaultOptions()
 	customWALSize := false
 	if len(options) != 0 {
 		cfg = options[0]
@@ -28,6 +36,15 @@ func Open(dir string, options ...Options) (*Store, error) {
 	}
 	if cfg.WALReplayPolicy > WALReplayBestEffort {
 		return nil, ErrReplayPolicy
+	}
+	if cfg.MinorCompactionThreadNum == 0 {
+		cfg.MinorCompactionThreadNum = defaultMinorCompactionThreadNum
+	}
+	if cfg.MaxImmutableWALNum == 0 {
+		cfg.MaxImmutableWALNum = defaultMaxImmutableWALNum
+	}
+	if cfg.MinorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 {
+		return nil, ErrOptions
 	}
 	if cfg.WALSize > int64(recordOffsetLimit) {
 		return nil, ErrWalFull
@@ -56,7 +73,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 				return nil, err
 			}
 		}
-		records, err := openSegmentedRecordStore(walSegmentsPath(dir), cfg.WALSize, state.activeWALFileNo, state.nextFileNo)
+		records, err := openSegmentedRecordStore(dir, cfg.WALSize, state.activeWALFileNo, state.nextFileNo)
 		if err != nil {
 			return nil, err
 		}
@@ -74,11 +91,21 @@ func Open(dir string, options ...Options) (*Store, error) {
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
 	manifestOwnedByStore = true
 	return &Store{
-		backend:             opened.backend,
-		manifest:            manifest,
-		records:             opened.records,
-		checkpointWALFileNo: opened.checkpointWALFileNo,
+		backend:                  opened.backend,
+		manifest:                 manifest,
+		records:                  opened.records,
+		checkpointWALFileNo:      opened.checkpointWALFileNo,
+		minorCompactionThreadNum: cfg.MinorCompactionThreadNum,
+		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
 	}, nil
+}
+
+func defaultOptions() Options {
+	return Options{
+		WALSize:                  defaultWALSize,
+		MinorCompactionThreadNum: defaultMinorCompactionThreadNum,
+		MaxImmutableWALNum:       defaultMaxImmutableWALNum,
+	}
 }
 
 type openedStoreParts struct {
@@ -187,7 +214,7 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 
 func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedStoreParts, error) {
 	walDir := walSegmentsPath(dir)
-	if err := os.MkdirAll(walDir, 0o755); err != nil {
+	if err := createRecordSegmentDirs(dir); err != nil {
 		return openedStoreParts{}, err
 	}
 	ids, err := listWALSegmentIDs(walDir)
@@ -222,7 +249,7 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 	if err := os.RemoveAll(primaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
-	records, err := openSegmentedRecordStore(walDir, walSize, activeWALFileNo, nextFileNo)
+	records, err := openSegmentedRecordStore(dir, walSize, activeWALFileNo, nextFileNo)
 	if err != nil {
 		return openedStoreParts{}, err
 	}
@@ -310,6 +337,12 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 		case walOpDelete:
 			_, _, err := index.Delete(key)
 			return err
+		case walOpInstallSST:
+			sourceWALFileNo, sstFileNo, err := decodeInstallSSTPayload(key)
+			if err != nil {
+				return err
+			}
+			return installSSTIntoIndex(records, index, sourceWALFileNo, sstFileNo)
 		default:
 			return ErrCorruptWAL
 		}

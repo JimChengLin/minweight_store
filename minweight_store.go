@@ -16,17 +16,22 @@ var (
 	ErrFatal        = errors.New("minweight_store: store is fatal")
 	ErrReplayPolicy = errors.New("minweight_store: invalid wal replay policy")
 	ErrManifest     = errors.New("minweight_store: corrupt manifest")
+	ErrRecord       = errors.New("minweight_store: corrupt record store")
 	ErrParquet      = errors.New("minweight_store: invalid parquet record store")
+	ErrOptions      = errors.New("minweight_store: invalid options")
 )
 
 type Store struct {
-	secondaryIndexMu    sync.Mutex
-	primaryMu           sync.RWMutex
-	backend             *indexBackend
-	manifest            *manifest
-	records             *segmentedRecordStore
-	checkpointWALFileNo uint64
-	fatal               error
+	compactionMu             sync.RWMutex
+	secondaryIndexMu         sync.Mutex
+	primaryMu                sync.RWMutex
+	backend                  *indexBackend
+	manifest                 *manifest
+	records                  *segmentedRecordStore
+	checkpointWALFileNo      uint64
+	minorCompactionThreadNum int
+	maxImmutableWALNum       int
+	fatal                    error
 }
 
 type Item struct {
@@ -196,6 +201,9 @@ func (s *Store) SeekLE(key []byte) (Item, bool, error) {
 }
 
 func (s *Store) Close() error {
+	s.compactionMu.Lock()
+	defer s.compactionMu.Unlock()
+
 	s.secondaryIndexMu.Lock()
 	defer s.secondaryIndexMu.Unlock()
 

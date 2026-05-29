@@ -56,6 +56,35 @@ func TestOpenReplaysWAL(t *testing.T) {
 	})
 }
 
+func TestOpenCreatesRecordSegmentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	for _, path := range []string{walSegmentsPath(dir), sstSegmentsPath(dir)} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s is not a directory", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(walSegmentsPath(dir), walSegmentName(firstWALSegmentNo))); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(sstSegmentsPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("sst entries after fresh open = %d, want 0", len(entries))
+	}
+}
+
 func TestOpenResetsPersistedIndexBeforeReplay(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})

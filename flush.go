@@ -169,6 +169,12 @@ func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFile
 		case walOpDelete:
 			_, _, err := index.Delete(key)
 			return err
+		case walOpInstallSST:
+			sourceWALFileNo, sstFileNo, err := decodeInstallSSTPayload(key)
+			if err != nil {
+				return err
+			}
+			return installSSTIntoIndex(records, index, sourceWALFileNo, sstFileNo)
 		default:
 			return ErrCorruptWAL
 		}

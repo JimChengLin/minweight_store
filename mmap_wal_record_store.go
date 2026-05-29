@@ -14,8 +14,6 @@ import (
 )
 
 const (
-	defaultWALSize int64 = 128 * 1024 * 1024
-
 	walVersion uint32 = 1
 
 	walHeaderVersionOffset = 8
@@ -27,8 +25,11 @@ const (
 	walRecordValueOffset = 5
 	walRecordCRCOffset   = 9
 
-	walOpPut    = 1
-	walOpDelete = 2
+	walOpPut        = 1
+	walOpDelete     = 2
+	walOpInstallSST = 3
+
+	walInstallSSTPayloadSize = 16
 )
 
 var walHeaderMagic = [8]byte{'M', 'W', 'W', 'A', 'L', '0', '1', 0}
@@ -119,6 +120,13 @@ func (s *mmapWALRecordStore) Append(key, value []byte) (minpatricia.Position, er
 
 func (s *mmapWALRecordStore) Delete(key []byte) (minpatricia.Position, error) {
 	return s.appendRecord(walOpDelete, key, nil)
+}
+
+func (s *mmapWALRecordStore) AppendInstallSSTRecord(sourceWALFileNo, sstFileNo uint64) (minpatricia.Position, error) {
+	var payload [walInstallSSTPayloadSize]byte
+	binary.LittleEndian.PutUint64(payload[:8], sourceWALFileNo)
+	binary.LittleEndian.PutUint64(payload[8:], sstFileNo)
+	return s.appendRecord(walOpInstallSST, payload[:], nil)
 }
 
 func (s *mmapWALRecordStore) Free(pos minpatricia.Position) error {
@@ -321,10 +329,16 @@ func (s *mmapWALRecordStore) appendRecord(op byte, key, value []byte) (minpatric
 	if s.sealed {
 		return 0, ErrWalSealed
 	}
-	if op != walOpPut && op != walOpDelete {
+	if op != walOpPut && op != walOpDelete && op != walOpInstallSST {
 		return 0, ErrCorruptWAL
 	}
 	if op == walOpDelete {
+		value = nil
+	}
+	if op == walOpInstallSST {
+		if len(key) != walInstallSSTPayloadSize || len(value) != 0 {
+			return 0, ErrCorruptWAL
+		}
 		value = nil
 	}
 	if len(key) > minpatricia.MaxKeySize {
@@ -370,7 +384,7 @@ func (s *mmapWALRecordStore) recordAtOffset(offset uint64, verifyCRC bool) (walR
 	}
 	header := s.data[offset : offset+walRecordHeaderSize]
 	op := header[walRecordOpOffset]
-	if op != walOpPut && op != walOpDelete {
+	if op != walOpPut && op != walOpDelete && op != walOpInstallSST {
 		return walRecord{}, ErrCorruptWAL
 	}
 	keyLen := uint64(binary.LittleEndian.Uint32(header[walRecordKeyOffset : walRecordKeyOffset+4]))
@@ -379,6 +393,9 @@ func (s *mmapWALRecordStore) recordAtOffset(offset uint64, verifyCRC bool) (walR
 		return walRecord{}, ErrCorruptWAL
 	}
 	if op == walOpDelete && valueLen != 0 {
+		return walRecord{}, ErrCorruptWAL
+	}
+	if op == walOpInstallSST && (keyLen != walInstallSSTPayloadSize || valueLen != 0) {
 		return walRecord{}, ErrCorruptWAL
 	}
 	end := offset + walRecordHeaderSize + keyLen + valueLen

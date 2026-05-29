@@ -286,6 +286,35 @@ func (s *parquetRecordStore) closeAfterSync() error {
 	return s.Close()
 }
 
+func (s *parquetRecordStore) scanKeys(fn func(rowIndex uint64, key []byte) error) error {
+	buffer := make([]parquetRecordKey, 256)
+	for rowGroup, group := range s.rowGroups {
+		reader := parquet.NewGenericRowGroupReader[parquetRecordKey](group)
+		rowIndex := s.rowStarts[rowGroup]
+		for {
+			n, err := reader.Read(buffer)
+			for i := 0; i < n; i++ {
+				if err := fn(rowIndex, buffer[i].Key); err != nil {
+					_ = reader.Close()
+					return err
+				}
+				rowIndex++
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				_ = reader.Close()
+				return err
+			}
+		}
+		if err := reader.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *parquetRecordStore) recordLocation(pos minpatricia.Position) (int, int64, bool) {
 	fileNo, rowIndex, ok := parseParquetRecordPosition(pos)
 	if !ok || fileNo != s.fileNo {

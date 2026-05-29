@@ -53,7 +53,7 @@ defer store.Close()
 positions are 63-bit record handles: high 33 bits are record file number, low
 30 bits are offset or row inside that file. The file suffix determines the
 record-store kind; current Store positions point to WAL segments under
-`wal/*.wal`.
+`wal/*.wal` or compacted Parquet segments under `sst/*.parquet`.
 
 `Flush` seals the active WAL, creates a new active WAL, syncs the new WAL
 header, syncs the live primary index and sealed WAL, writes `MANIFEST` with
@@ -76,8 +76,9 @@ synced primary index, copies primary to secondary, and clears the flag. If
 `Options.WALSize` is unset, `Open` uses manifest `wal_segment_size` for future
 WAL segments; an explicit `Options.WALSize` overrides it. Existing WAL segment
 files are opened at their actual file size.
-Default options use a 128MiB WAL segment, `WALReplayPointInTime`, and
-`VerifyIndexOnRead=false`.
+Default options use a 128MiB WAL segment, `WALReplayPointInTime`,
+`VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`, and
+`MaxImmutableWALNum=1`.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index
@@ -97,5 +98,10 @@ secondary checkpoint index:
 - `WALReplayBestEffort`: repair the WAL before replay by keeping CRC-valid
   records and deleting corrupt bytes, then replay the repaired WAL strictly.
 
-Current flush still keeps records in WAL segments; Parquet materialization and
-WAL garbage collection are intentionally left for later versions.
+Minor compaction can materialize checkpointed immutable WAL records into a
+Parquet segment. It scans a sealed WAL, sorts put records by key, filters each
+candidate by comparing the current index position, writes the live records into
+Parquet, appends an `install_sst` WAL record (`op=3`, payload is source WAL
+file number plus Parquet file number), then retargets primary index entries
+from the source WAL file number to the new Parquet file number. WAL garbage
+collection is intentionally left for a later version.
