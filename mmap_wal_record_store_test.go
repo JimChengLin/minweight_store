@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestMmapWALRecordStoreSyncClearsMetadataDirty(t *testing.T) {
+func TestMmapWALRecordStoreSyncClearsDirtyFlags(t *testing.T) {
 	path := filepath.Join(t.TempDir(), walSegmentName(firstWALSegmentNo))
 	wal, err := openMmapWALRecordStore(path, 1<<20, firstWALSegmentNo)
 	if err != nil {

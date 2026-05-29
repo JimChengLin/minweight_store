@@ -275,40 +275,21 @@ func (s *mmapWALRecordStore) Sync() error {
 		}
 		s.dataDirty = false
 	}
-	return s.syncMetadata()
+	if s.metadataDirty {
+		if err := syncMmapFileMetadata(s.file); err != nil {
+			return err
+		}
+		s.metadataDirty = false
+	}
+	return nil
 }
 
 func (s *mmapWALRecordStore) Close() error {
-	var firstErr error
-	if s.data != nil && s.dataDirty {
-		if err := msyncMmap(s.data); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			s.dataDirty = false
-		}
-	}
-	if s.file != nil {
-		if err := s.syncMetadata(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
+	firstErr := s.Sync()
 	if err := s.closeAfterSync(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
-}
-
-func (s *mmapWALRecordStore) syncMetadata() error {
-	if !s.metadataDirty {
-		return nil
-	}
-	if err := syncMmapFileMetadata(s.file); err != nil {
-		return err
-	}
-	s.metadataDirty = false
-	return nil
 }
 
 func (s *mmapWALRecordStore) closeAfterSync() error {
