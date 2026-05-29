@@ -94,20 +94,6 @@ func (b *indexBackend) close() error {
 	return firstErr
 }
 
-func (b *indexBackend) syncAndClose() error {
-	firstErr := b.sync()
-	var err error
-	if firstErr == nil {
-		err = b.closeAfterSync()
-	} else {
-		err = b.close()
-	}
-	if err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
-}
-
 func (b *indexBackend) closeAfterSync() error {
 	var firstErr error
 	if err := b.nodes.closeAfterSync(); err != nil && firstErr == nil {

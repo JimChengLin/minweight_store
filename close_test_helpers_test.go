@@ -13,3 +13,17 @@ func closeForTest(tb testing.TB, closer testCloser) {
 		tb.Fatal(err)
 	}
 }
+
+func (b *indexBackend) syncAndClose() error {
+	firstErr := b.sync()
+	var err error
+	if firstErr == nil {
+		err = b.closeAfterSync()
+	} else {
+		err = b.close()
+	}
+	if err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
