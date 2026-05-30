@@ -249,12 +249,8 @@ func BenchmarkMmapNodeStoreCopyWorkers(b *testing.B) {
 		{name: "dense", livePerExtent: mmapNodeSlotsPerExtent},
 	} {
 		b.Run(density.name, func(b *testing.B) {
-			for _, workers := range []int{1, 2, 4, 8} {
-				b.Run(fmt.Sprintf("%d_workers_equal", workers), func(b *testing.B) {
-					src, dst, _ := prepareMmapNodeStoreMultiExtentCopyBench(b, 4, density.livePerExtent)
-					benchmarkMmapNodeStoreCopyExistingWithWorkers(b, src, dst, nil, workers)
-				})
-				b.Run(fmt.Sprintf("%d_workers_all_diff", workers), func(b *testing.B) {
+			for _, workers := range []int{1, 2, 4} {
+				b.Run(fmt.Sprintf("%d_workers_existing", workers), func(b *testing.B) {
 					src, dst, ids := prepareMmapNodeStoreMultiExtentCopyBench(b, 4, density.livePerExtent)
 					benchmarkMmapNodeStoreCopyExistingWithWorkers(b, src, dst, ids, workers)
 				})

@@ -36,9 +36,6 @@ func cloneMmapNodeExtentFile(src, dst string) error {
 		}
 		return err
 	}
-	if err := requireMmapNodeExtentFile(out); err != nil {
-		return err
-	}
 	if err := out.Sync(); err != nil {
 		return err
 	}

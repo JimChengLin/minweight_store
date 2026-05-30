@@ -312,7 +312,7 @@ func TestCopyMmapNodeStoreDirPreservesDestinationDir(t *testing.T) {
 	}
 }
 
-func TestCopyMmapNodeStoreDirUpdatesOnlyDifferentUsedPages(t *testing.T) {
+func TestCopyMmapNodeStoreDirReplacesExistingExtent(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 
@@ -365,8 +365,8 @@ func TestCopyMmapNodeStoreDirUpdatesOnlyDifferentUsedPages(t *testing.T) {
 		t.Fatalf("copied used page = %q, want source used page", gotUsed)
 	}
 	gotUnused := readFileBytes(t, dstExtent, unusedOffset, len("dst-unused"))
-	if string(gotUnused) != "dst-unused" {
-		t.Fatalf("unused page = %q, want dst-unused", gotUnused)
+	if string(gotUnused) != "src-unused" {
+		t.Fatalf("unused page = %q, want src-unused", gotUnused)
 	}
 }
 
