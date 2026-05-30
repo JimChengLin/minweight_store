@@ -11,6 +11,14 @@ import (
 const crashTestWALSize int64 = 8 << 10
 
 func TestStoreCrashRecoveryChaos(t *testing.T) {
+	t.Run("compaction_path", func(t *testing.T) {
+		runCrashRecoveryProgram(t, []byte{
+			0, 22, 4,
+			33, 55, 4,
+			9, 4,
+			10, 5,
+		})
+	})
 	for seed := int64(1); seed <= 3; seed++ {
 		t.Run(fmt.Sprintf("seed_%02d", seed), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))
@@ -40,10 +48,7 @@ func runCrashRecoveryProgram(t *testing.T, program []byte) {
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := Open(dir, Options{WALSize: crashTestWALSize})
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openCrashProgramStore(t, dir)
 	defer func() {
 		if store != nil && store.backend != nil {
 			closeForTest(t, store)
@@ -53,7 +58,7 @@ func runCrashRecoveryProgram(t *testing.T, program []byte) {
 	expected := make(map[string]string)
 	for step, op := range program {
 		key := fmt.Sprintf("key-%02d", int(op>>4)%8)
-		switch op % 9 {
+		switch op % 11 {
 		case 0, 1, 2:
 			value := fmt.Sprintf("value-%03d-%02x", step, op)
 			if err := store.Put([]byte(key), []byte(value)); err != nil {
@@ -87,18 +92,38 @@ func runCrashRecoveryProgram(t *testing.T, program []byte) {
 				t.Fatalf("step %d close: %v", step, err)
 			}
 			store = reopenCrashTestStore(t, dir, expected)
+		case 9:
+			if err := store.minorCompact(); err != nil {
+				t.Fatalf("step %d minor compact: %v", step, err)
+			}
+		case 10:
+			if err := store.MajorCompact(); err != nil {
+				t.Fatalf("step %d major compact: %v", step, err)
+			}
 		}
 	}
 	assertCrashStoreContents(t, store, expected)
 }
 
-func reopenCrashTestStore(t *testing.T, dir string, expected map[string]string) *Store {
+func openCrashProgramStore(t *testing.T, dir string) *Store {
 	t.Helper()
 
-	store, err := Open(dir, Options{WALSize: crashTestWALSize})
+	store, err := Open(dir, Options{
+		WALSize:                  crashTestWALSize,
+		MajorCompactionThreadNum: 2,
+		TargetSSTSize:            1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.stopMinorCompactionDispatcher()
+	return store
+}
+
+func reopenCrashTestStore(t *testing.T, dir string, expected map[string]string) *Store {
+	t.Helper()
+
+	store := openCrashProgramStore(t, dir)
 	assertCrashStoreContents(t, store, expected)
 	return store
 }

@@ -49,15 +49,17 @@ func New() *Store {
 	}
 }
 
-func (s *Store) Len() int {
+// Len returns the number of live keys visible through the primary index.
+// It returns ErrClosed or the store's fatal error if the store cannot serve reads.
+func (s *Store) Len() (int, error) {
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 
 	backend, err := s.openBackend()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return backend.len()
+	return backend.len(), nil
 }
 
 func (s *Store) Put(key, value []byte) error {

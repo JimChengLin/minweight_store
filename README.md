@@ -3,10 +3,11 @@
 `minweight_store` is a small single-node ordered KV store. The current storage
 behavior is summarized below.
 
-Current V0 is an in-memory ordered KV store backed by
-[`minpatricia`](https://github.com/JimChengLin/minpatricia).
+`New` creates an in-memory ordered KV store backed by
+[`minpatricia`](https://github.com/JimChengLin/minpatricia). `Open` creates the
+disk-backed implementation described below.
 
-## V0 API
+## Basic API
 
 ```go
 store := minweight_store.New()
@@ -14,6 +15,7 @@ store := minweight_store.New()
 _ = store.Put([]byte("alpha"), []byte("one"))
 value, ok, err := store.Get([]byte("alpha"))
 deleted, err := store.Delete([]byte("alpha"))
+length, err := store.Len()
 
 item, ok, err := store.SeekGE([]byte("a"))
 item, ok, err = store.SeekLE([]byte("z"))
@@ -39,6 +41,8 @@ Range semantics:
 
 ## V1 mmap WAL + flush
 
+The disk-backed implementation currently builds on Darwin and Linux.
+
 ```go
 store, err := minweight_store.Open("db", minweight_store.Options{
 	WALSize: 128 << 20,
@@ -63,10 +67,11 @@ pending source WALs made obsolete by `install_sst`, fsyncs `wal/`, then writes
 `MANIFEST` again with `primary_wal_flushed=false`. The live primary index is not
 switched during flush.
 
-`MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
-`next_file_no`, `wal_segment_size`, `primary_wal_flushed`, live SST file
-numbers, `seq`, and a CRC. It is a 1MiB variable-size log; normal commits append
-and fsync the manifest file, and replacement is only used when the log is full.
+`MANIFEST` stores `version`, `record_size`, `checkpoint_wal_file_no`,
+`active_wal_file_no`, `next_file_no`, `wal_segment_size`,
+`primary_wal_flushed`, live SST file numbers, `seq`, and a CRC. It is a 1MiB
+variable-size log; normal commits append and fsync the manifest file, and
+replacement is only used when the log is full.
 On startup, a
 legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets
 `Open` use the primary runtime index directly: no secondary copy, no replay, and
@@ -117,3 +122,13 @@ Parquet segment so the source WAL deletion still has a durable `install_sst`
 record. Pending source WALs are deleted only after a later checkpoint has replayed
 the `install_sst` into the secondary index, and before the final
 `primary_wal_flushed=false` manifest commit.
+
+`MajorCompact` rewrites live Parquet SST segments into new Parquet segments. It
+selects live SST file numbers from the manifest-backed record store, merge-sorts
+their keys, keeps only entries whose current primary index position still points
+at the old SST position, writes those entries into new SSTs near
+`TargetSSTSize`, then appends an `install_sst_batch` WAL record (`op=4`) with
+old and new SST file numbers. The publish step marks new SSTs live, retargets
+primary index entries, and schedules old SSTs for deletion. Old SST files are
+deleted only after checkpoint replay applies the batch record to the secondary
+index and before the final `primary_wal_flushed=false` manifest commit.

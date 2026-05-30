@@ -37,8 +37,8 @@ func TestPutGetDelete(t *testing.T) {
 	if err != nil || !ok || string(got) != "two" {
 		t.Fatalf("Get(alpha) after replace = (%q,%v,%v), want (two,true,nil)", got, ok, err)
 	}
-	if store.Len() != 1 {
-		t.Fatalf("Len = %d, want 1", store.Len())
+	if n, err := store.Len(); err != nil || n != 1 {
+		t.Fatalf("Len = (%d,%v), want (1,nil)", n, err)
 	}
 
 	deleted, err := store.Delete([]byte("alpha"))
@@ -206,8 +206,8 @@ func TestStoreFatalAfterRecordAcceptedIndexFailure(t *testing.T) {
 	if !errors.Is(err, ErrFatal) {
 		t.Fatalf("Scan after fatal err = %v, want %v", err, ErrFatal)
 	}
-	if store.Len() != 0 {
-		t.Fatalf("Len after fatal = %d, want 0", store.Len())
+	if _, err := store.Len(); !errors.Is(err, ErrFatal) {
+		t.Fatalf("Len after fatal err = %v, want %v", err, ErrFatal)
 	}
 	if err := store.Close(); !errors.Is(err, ErrFatal) {
 		t.Fatalf("Close after fatal err = %v, want %v", err, ErrFatal)
