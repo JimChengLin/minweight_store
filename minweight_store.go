@@ -30,6 +30,7 @@ type Store struct {
 	checkpointWALFileNo      uint64
 	minorCompactionThreadNum int
 	maxImmutableWALNum       int
+	targetSSTSize            int64
 	minorCompaction          *minorCompactionDispatcher
 	fatal                    error
 }

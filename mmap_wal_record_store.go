@@ -25,11 +25,13 @@ const (
 	walRecordValueOffset = 5
 	walRecordCRCOffset   = 9
 
-	walOpPut        = 1
-	walOpDelete     = 2
-	walOpInstallSST = 3
+	walOpPut             = 1
+	walOpDelete          = 2
+	walOpInstallSST      = 3
+	walOpInstallSSTBatch = 4
 
-	walInstallSSTPayloadSize = 16
+	walInstallSSTPayloadSize     = 16
+	walInstallSSTBatchHeaderSize = 8
 )
 
 var walHeaderMagic = [8]byte{'M', 'W', 'W', 'A', 'L', '0', '1', 0}
@@ -116,10 +118,16 @@ func openMmapWALRecordStore(path string, size int64, fileNo uint64) (*mmapWALRec
 }
 
 func (s *mmapWALRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+	if len(key) > minpatricia.MaxKeySize {
+		return 0, minpatricia.ErrKeyTooLarge
+	}
 	return s.appendRecord(walOpPut, key, value)
 }
 
 func (s *mmapWALRecordStore) Delete(key []byte) (minpatricia.Position, error) {
+	if len(key) > minpatricia.MaxKeySize {
+		return 0, minpatricia.ErrKeyTooLarge
+	}
 	return s.appendRecord(walOpDelete, key, nil)
 }
 
@@ -128,6 +136,14 @@ func (s *mmapWALRecordStore) AppendInstallSSTRecord(sourceWALFileNo, sstFileNo u
 	binary.LittleEndian.PutUint64(payload[:8], sourceWALFileNo)
 	binary.LittleEndian.PutUint64(payload[8:], sstFileNo)
 	return s.appendRecord(walOpInstallSST, payload[:], nil)
+}
+
+func (s *mmapWALRecordStore) AppendInstallSSTBatchRecord(oldSSTFileNos, newSSTFileNos []uint64) (minpatricia.Position, error) {
+	payload, err := encodeInstallSSTBatchPayload(oldSSTFileNos, newSSTFileNos)
+	if err != nil {
+		return 0, err
+	}
+	return s.appendRecord(walOpInstallSSTBatch, payload, nil)
 }
 
 func (s *mmapWALRecordStore) Free(pos minpatricia.Position) error {
@@ -313,21 +329,6 @@ func (s *mmapWALRecordStore) appendRecord(op byte, key, value []byte) (minpatric
 	if s.sealed {
 		return 0, ErrWalSealed
 	}
-	if op != walOpPut && op != walOpDelete && op != walOpInstallSST {
-		return 0, ErrCorruptWAL
-	}
-	if op == walOpDelete {
-		value = nil
-	}
-	if op == walOpInstallSST {
-		if len(key) != walInstallSSTPayloadSize || len(value) != 0 {
-			return 0, ErrCorruptWAL
-		}
-		value = nil
-	}
-	if len(key) > minpatricia.MaxKeySize {
-		return 0, minpatricia.ErrKeyTooLarge
-	}
 	keyLen := len(key)
 	valueLen := len(value)
 	if uint64(keyLen) > uint64(^uint32(0)) || uint64(valueLen) > uint64(^uint32(0)) {
@@ -368,12 +369,12 @@ func (s *mmapWALRecordStore) recordAtOffset(offset uint64, verifyCRC bool) (walR
 	}
 	header := s.data[offset : offset+walRecordHeaderSize]
 	op := header[walRecordOpOffset]
-	if op != walOpPut && op != walOpDelete && op != walOpInstallSST {
+	if op != walOpPut && op != walOpDelete && op != walOpInstallSST && op != walOpInstallSSTBatch {
 		return walRecord{}, ErrCorruptWAL
 	}
 	keyLen := uint64(binary.LittleEndian.Uint32(header[walRecordKeyOffset : walRecordKeyOffset+4]))
 	valueLen := uint64(binary.LittleEndian.Uint32(header[walRecordValueOffset : walRecordValueOffset+4]))
-	if keyLen > minpatricia.MaxKeySize {
+	if (op == walOpPut || op == walOpDelete) && keyLen > minpatricia.MaxKeySize {
 		return walRecord{}, ErrCorruptWAL
 	}
 	if op == walOpDelete && valueLen != 0 {
@@ -382,11 +383,19 @@ func (s *mmapWALRecordStore) recordAtOffset(offset uint64, verifyCRC bool) (walR
 	if op == walOpInstallSST && (keyLen != walInstallSSTPayloadSize || valueLen != 0) {
 		return walRecord{}, ErrCorruptWAL
 	}
+	if op == walOpInstallSSTBatch && valueLen != 0 {
+		return walRecord{}, ErrCorruptWAL
+	}
 	end := offset + walRecordHeaderSize + keyLen + valueLen
 	if end < offset || end > s.used {
 		return walRecord{}, ErrCorruptWAL
 	}
 	record := s.data[offset:end]
+	if op == walOpInstallSSTBatch {
+		if _, _, err := validateInstallSSTBatchPayload(record[walRecordHeaderSize:]); err != nil {
+			return walRecord{}, err
+		}
+	}
 	if verifyCRC {
 		wantCRC := binary.LittleEndian.Uint32(header[walRecordCRCOffset : walRecordCRCOffset+4])
 		if gotCRC := walRecordCRC(record); gotCRC != wantCRC {

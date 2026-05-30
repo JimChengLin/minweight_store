@@ -168,7 +168,7 @@ func sortedWALPutCompactionCandidates(records *segmentedRecordStore, sourceWALFi
 				key: key,
 				pos: pos,
 			})
-		case walOpDelete, walOpInstallSST:
+		case walOpDelete, walOpInstallSST, walOpInstallSSTBatch:
 			return nil
 		default:
 			return ErrCorruptWAL
@@ -304,16 +304,27 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 	return records.scheduleWALDelete(sourceWALFileNo)
 }
 
-func scheduleInstalledSSTDeletesFromWAL(records *segmentedRecordStore, fileNo uint64) error {
+func scheduleDeletesFromInstallRecords(records *segmentedRecordStore, fileNo uint64) error {
 	return records.ReplayWAL(fileNo, WALReplayStrict, func(op byte, key []byte, pos minpatricia.Position) error {
-		if op != walOpInstallSST {
-			return nil
+		switch op {
+		case walOpInstallSST:
+			sourceWALFileNo, _, err := decodeInstallSSTPayload(key)
+			if err != nil {
+				return err
+			}
+			return records.scheduleWALDeleteIfPresent(sourceWALFileNo)
+		case walOpInstallSSTBatch:
+			oldSSTFileNos, _, err := decodeInstallSSTBatchPayload(key)
+			if err != nil {
+				return err
+			}
+			for _, fileNo := range oldSSTFileNos {
+				if err := records.scheduleSSTDeleteIfPresent(fileNo); err != nil {
+					return err
+				}
+			}
 		}
-		sourceWALFileNo, _, err := decodeInstallSSTPayload(key)
-		if err != nil {
-			return err
-		}
-		return records.scheduleWALDeleteIfPresent(sourceWALFileNo)
+		return nil
 	})
 }
 

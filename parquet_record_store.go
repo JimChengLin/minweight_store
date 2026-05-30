@@ -287,32 +287,87 @@ func (s *parquetRecordStore) closeAfterSync() error {
 }
 
 func (s *parquetRecordStore) scanKeys(fn func(rowIndex uint64, key []byte) error) error {
-	buffer := make([]parquetRecordKey, 256)
-	for rowGroup, group := range s.rowGroups {
-		reader := parquet.NewGenericRowGroupReader[parquetRecordKey](group)
-		rowIndex := s.rowStarts[rowGroup]
-		for {
-			n, err := reader.Read(buffer)
-			for i := 0; i < n; i++ {
-				if err := fn(rowIndex, buffer[i].Key); err != nil {
-					_ = reader.Close()
-					return err
-				}
-				rowIndex++
-			}
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				_ = reader.Close()
-				return err
-			}
+	reader := s.newKeyReader()
+	defer func() {
+		_ = reader.close()
+	}()
+	for {
+		rowIndex, key, ok, err := reader.next()
+		if err != nil {
+			return err
 		}
-		if err := reader.Close(); err != nil {
+		if !ok {
+			return nil
+		}
+		if err := fn(rowIndex, key); err != nil {
 			return err
 		}
 	}
-	return nil
+}
+
+type parquetRecordKeyReader struct {
+	store       *parquetRecordStore
+	nextGroup   int
+	rowIndex    uint64
+	reader      *parquet.GenericReader[parquetRecordKey]
+	buffer      []parquetRecordKey
+	bufferIndex int
+	bufferLen   int
+	pendingErr  error
+}
+
+func (s *parquetRecordStore) newKeyReader() *parquetRecordKeyReader {
+	return &parquetRecordKeyReader{
+		store:  s,
+		buffer: make([]parquetRecordKey, 256),
+	}
+}
+
+func (r *parquetRecordKeyReader) next() (uint64, []byte, bool, error) {
+	for {
+		if r.bufferIndex < r.bufferLen {
+			record := r.buffer[r.bufferIndex]
+			rowIndex := r.rowIndex
+			r.bufferIndex++
+			r.rowIndex++
+			return rowIndex, record.Key, true, nil
+		}
+		r.bufferIndex = 0
+		r.bufferLen = 0
+		if r.pendingErr != nil {
+			err := r.pendingErr
+			r.pendingErr = nil
+			if err := r.close(); err != nil {
+				return 0, nil, false, err
+			}
+			if errors.Is(err, io.EOF) {
+				continue
+			}
+			return 0, nil, false, err
+		}
+		if r.reader == nil {
+			if r.nextGroup >= len(r.store.rowGroups) {
+				return 0, nil, false, nil
+			}
+			r.reader = parquet.NewGenericRowGroupReader[parquetRecordKey](r.store.rowGroups[r.nextGroup])
+			r.rowIndex = r.store.rowStarts[r.nextGroup]
+			r.nextGroup++
+		}
+		n, err := r.reader.Read(r.buffer)
+		r.bufferLen = n
+		if err != nil {
+			r.pendingErr = err
+		}
+	}
+}
+
+func (r *parquetRecordKeyReader) close() error {
+	if r.reader == nil {
+		return nil
+	}
+	err := r.reader.Close()
+	r.reader = nil
+	return err
 }
 
 func (s *parquetRecordStore) recordLocation(pos minpatricia.Position) (int, int64, bool) {

@@ -74,7 +74,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy, backend.index); err != nil {
 		return 0, err
 	}
-	if err := records.deletePendingWALs(); err != nil {
+	if err := records.deletePendingSegments(); err != nil {
 		return 0, err
 	}
 	if err := manifest.write(state); err != nil {

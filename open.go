@@ -15,10 +15,12 @@ type Options struct {
 	VerifyIndexOnRead        bool
 	MinorCompactionThreadNum int
 	MaxImmutableWALNum       int
+	TargetSSTSize            int64
 }
 
 const (
 	defaultWALSize                  int64 = 128 * 1024 * 1024
+	defaultTargetSSTSize            int64 = 512 * 1024 * 1024
 	defaultMinorCompactionThreadNum       = 1
 	defaultMaxImmutableWALNum             = 1
 )
@@ -43,7 +45,10 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if cfg.MaxImmutableWALNum == 0 {
 		cfg.MaxImmutableWALNum = defaultMaxImmutableWALNum
 	}
-	if cfg.MinorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 {
+	if cfg.TargetSSTSize == 0 {
+		cfg.TargetSSTSize = defaultTargetSSTSize
+	}
+	if cfg.MinorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 || cfg.TargetSSTSize < 0 {
 		return nil, ErrOptions
 	}
 	if cfg.WALSize > int64(recordOffsetLimit) {
@@ -100,6 +105,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 		checkpointWALFileNo:      opened.checkpointWALFileNo,
 		minorCompactionThreadNum: cfg.MinorCompactionThreadNum,
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
+		targetSSTSize:            cfg.TargetSSTSize,
 	}
 	manifestOwnedByStore = true
 	store.startMinorCompactionDispatcher()
@@ -111,6 +117,7 @@ func defaultOptions() Options {
 		WALSize:                  defaultWALSize,
 		MinorCompactionThreadNum: defaultMinorCompactionThreadNum,
 		MaxImmutableWALNum:       defaultMaxImmutableWALNum,
+		TargetSSTSize:            defaultTargetSSTSize,
 	}
 }
 
@@ -208,10 +215,10 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 	if err := copyMmapNodeStoreDir(primaryIndexPath(dir), secondaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
-	if err := scheduleInstalledSSTDeletesFromWAL(records, state.checkpointWALFileNo); err != nil {
+	if err := scheduleDeletesFromInstallRecords(records, state.checkpointWALFileNo); err != nil {
 		return openedStoreParts{}, err
 	}
-	if err := records.deletePendingWALs(); err != nil {
+	if err := records.deletePendingSegments(); err != nil {
 		return openedStoreParts{}, err
 	}
 	state.primaryWALFlushed = false
@@ -370,6 +377,12 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 				return err
 			}
 			return applyInstallSSTRecord(records, index, liveIndex, sourceWALFileNo, sstFileNo)
+		case walOpInstallSSTBatch:
+			oldSSTFileNos, newSSTFileNos, err := decodeInstallSSTBatchPayload(key)
+			if err != nil {
+				return err
+			}
+			return applyInstallSSTBatchRecord(records, index, liveIndex, oldSSTFileNos, newSSTFileNos)
 		default:
 			return ErrCorruptWAL
 		}
