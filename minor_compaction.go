@@ -264,22 +264,31 @@ func retargetInstalledSSTEntries(records *segmentedRecordStore, index *minpatric
 	return nil
 }
 
-func applyInstallSSTRecord(records *segmentedRecordStore, index *minpatricia.Index, sourceWALFileNo, sstFileNo uint64) error {
+func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minpatricia.Index, sourceWALFileNo, sstFileNo uint64) error {
 	sst, err := records.parquetSegment(sstFileNo)
 	if err != nil {
 		return err
 	}
 	if err := sst.scanKeys(func(rowIndex uint64, key []byte) error {
+		newPos, err := makeParquetRecordPosition(sstFileNo, rowIndex)
+		if err != nil {
+			return err
+		}
+		if liveIndex != nil {
+			livePos, ok, err := liveIndex.Probe(key)
+			if err != nil {
+				return err
+			}
+			if !ok || livePos != newPos {
+				return nil
+			}
+		}
 		oldPos, ok, err := index.Get(key)
 		if err != nil || !ok {
 			return err
 		}
 		if recordPositionFileNo(oldPos) != sourceWALFileNo {
 			return nil
-		}
-		newPos, err := makeParquetRecordPosition(sstFileNo, rowIndex)
-		if err != nil {
-			return err
 		}
 		replacedPos, replaced, err := index.Put(key, newPos)
 		if err != nil {

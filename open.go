@@ -172,7 +172,7 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 	if err != nil {
 		return openedStoreParts{}, err
 	}
-	if err := replayWALIntoIndex(records, walFileNo, replayPolicy, backend.index); err != nil {
+	if err := replayWALIntoIndex(records, walFileNo, replayPolicy, backend.index, nil); err != nil {
 		return openedStoreParts{}, err
 	}
 	checkpointWALFileNo, err := checkpointActiveWAL(dir, backend, records, manifest, state.checkpointWALFileNo, replayPolicy)
@@ -288,7 +288,7 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 	nodesOwnershipTransferred := false
 	defer closeMmapNodesUnlessOwnershipTransferred(nodes, &nodesOwnershipTransferred)
 	backend := newIndexBackendWithNodes(records, nodes)
-	if err := replayWALIntoIndex(records, firstWALSegmentNo, replayPolicy, backend.index); err != nil {
+	if err := replayWALIntoIndex(records, firstWALSegmentNo, replayPolicy, backend.index, nil); err != nil {
 		return openedStoreParts{}, err
 	}
 	if err := backend.nodes.Sync(); err != nil {
@@ -343,10 +343,22 @@ func prepareWALForReplay(records *segmentedRecordStore, fileNo uint64, policy WA
 	return WALReplayStrict, nil
 }
 
-func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WALReplayPolicy, index *minpatricia.Index) error {
+// liveIndex is the already-synced primary index used by checkpoint replay to
+// skip records whose final position is no longer live. Delete has no comparable
+// final position, so it is still replayed.
+func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WALReplayPolicy, index, liveIndex *minpatricia.Index) error {
 	return records.ReplayWAL(fileNo, policy, func(op byte, key []byte, pos minpatricia.Position) error {
 		switch op {
 		case walOpPut:
+			if liveIndex != nil {
+				livePos, ok, err := liveIndex.Probe(key)
+				if err != nil {
+					return err
+				}
+				if !ok || livePos != pos {
+					return nil
+				}
+			}
 			_, _, err := index.Put(key, pos)
 			return err
 		case walOpDelete:
@@ -357,7 +369,7 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 			if err != nil {
 				return err
 			}
-			return applyInstallSSTRecord(records, index, sourceWALFileNo, sstFileNo)
+			return applyInstallSSTRecord(records, index, liveIndex, sourceWALFileNo, sstFileNo)
 		default:
 			return ErrCorruptWAL
 		}

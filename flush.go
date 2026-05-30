@@ -71,7 +71,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 		return 0, err
 	}
 	state.primaryWALFlushed = false
-	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy); err != nil {
+	if err := checkpointSecondaryIndex(dir, records, oldWALFileNo, policy, backend.index); err != nil {
 		return 0, err
 	}
 	if err := records.deletePendingWALs(); err != nil {
@@ -131,7 +131,7 @@ func syncPrimaryIndexAndWAL(backend *indexBackend, wal *mmapWALRecordStore) erro
 	return firstErr
 }
 
-func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFileNo uint64, policy WALReplayPolicy) error {
+func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFileNo uint64, policy WALReplayPolicy, liveIndex *minpatricia.Index) error {
 	secondaryPath := secondaryIndexPath(dir)
 	if walFileNo == firstWALSegmentNo {
 		if err := os.RemoveAll(secondaryPath); err != nil {
@@ -159,7 +159,7 @@ func checkpointSecondaryIndex(dir string, records *segmentedRecordStore, walFile
 		}
 	}
 
-	if err := replayWALIntoIndex(records, walFileNo, policy, index); err != nil {
+	if err := replayWALIntoIndex(records, walFileNo, policy, index, liveIndex); err != nil {
 		return err
 	}
 	if err := nodes.Sync(); err != nil {

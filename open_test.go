@@ -944,7 +944,7 @@ func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, s
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkpointSecondaryIndex(store.manifest.dir(), store.records, oldWALFileNo, WALReplayStrict); err != nil {
+	if err := checkpointSecondaryIndex(store.manifest.dir(), store.records, oldWALFileNo, WALReplayStrict, store.backend.index); err != nil {
 		t.Fatal(err)
 	}
 	dirtySyncAndCloseStoreForTest(t, store)
