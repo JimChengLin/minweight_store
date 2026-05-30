@@ -210,6 +210,9 @@ func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64, entries [
 			canFlush = active != nil && active.used != walHeaderSize
 		}
 		if err == nil {
+			err = s.records.markSSTLive(sstFileNo)
+		}
+		if err == nil {
 			err = retargetInstalledSSTEntries(s.records, backend.index, sstFileNo, entries)
 		}
 		if err == nil {
@@ -291,6 +294,9 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 		}
 		return records.Free(oldPos)
 	}); err != nil {
+		return err
+	}
+	if err := records.markSSTLive(sstFileNo); err != nil {
 		return err
 	}
 	return records.scheduleWALDelete(sourceWALFileNo)

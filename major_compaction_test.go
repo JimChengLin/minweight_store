@@ -72,6 +72,56 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 	assertGet(t, reopened, "delta", "four")
 }
 
+func TestMajorCompactBuiltParquetWithoutInstallSSTBatchIsCleaned(t *testing.T) {
+	dir := t.TempDir()
+	store := openMajorCompactionStoreForTest(t, dir)
+	oldSSTs := parquetFileNosForTest(store)
+	newSSTs, _, err := store.buildMajorCompactionSSTs(oldSSTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSSTFileNos := parquetStoreFileNos(newSSTs)
+	for _, sst := range newSSTs {
+		if err := sst.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Put([]byte("echo"), []byte("five")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{
+		WALSize:       crashTestWALSize,
+		TargetSSTSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	gotSSTs := recordFileNoSet(parquetFileNosForTest(reopened))
+	for _, fileNo := range oldSSTs {
+		if _, ok := gotSSTs[fileNo]; !ok {
+			t.Fatalf("old parquet %d is not live after Open", fileNo)
+		}
+	}
+	for _, fileNo := range newSSTFileNos {
+		if _, ok := gotSSTs[fileNo]; ok {
+			t.Fatalf("uninstalled major parquet %d opened as live", fileNo)
+		}
+		if fileExistsForTest(t, parquetSegmentPath(dir, fileNo)) {
+			t.Fatalf("uninstalled major parquet %d still exists after Open", fileNo)
+		}
+	}
+	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "echo", "five")
+}
+
 func TestMajorCompactMergeSortsSSTStreams(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: crashTestWALSize})

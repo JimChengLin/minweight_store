@@ -517,7 +517,7 @@ func TestOpenRejectsCorruptManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for offset := 0; offset+manifestRecordSize <= len(data); offset += manifestRecordSize {
+	for offset := 0; offset+manifestRecordHeaderSize <= len(data); offset += manifestRecordHeaderSize {
 		data[offset+manifestVersionOffset] ^= 0xff
 	}
 	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
@@ -911,6 +911,7 @@ func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
 		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
+		liveSSTFileNos:      store.records.liveSSTFileNosForManifest(),
 	}
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)
@@ -940,6 +941,7 @@ func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, s
 		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
+		liveSSTFileNos:      store.records.liveSSTFileNosForManifest(),
 	}
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)

@@ -38,10 +38,15 @@ type recordSegmentDelete struct {
 }
 
 type segmentedRecordStore struct {
-	rootDir           string
-	size              int64
-	mu                sync.RWMutex
-	segments          map[uint64]recordSegment
+	rootDir  string
+	size     int64
+	mu       sync.RWMutex
+	segments map[uint64]recordSegment
+	// liveSSTs is the durable installed SST set: loaded from MANIFEST, extended
+	// by replayed/successfully appended InstallSST records, and reduced by
+	// checkpointed SST deletes. It intentionally excludes pre-install parquet
+	// files that only exist because allocation/build reached disk.
+	liveSSTs          map[uint64]struct{}
 	active            *mmapWALRecordStore
 	activeFileNo      uint64
 	nextFileNo        uint64
@@ -51,7 +56,7 @@ type segmentedRecordStore struct {
 	walDirDirty bool
 }
 
-func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo uint64) (*segmentedRecordStore, error) {
+func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo uint64, liveSSTFileNos []uint64) (*segmentedRecordStore, error) {
 	walDir := walSegmentsPath(dir)
 	ids, err := listWALSegmentIDs(walDir)
 	if err != nil {
@@ -81,10 +86,14 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 		rootDir:           dir,
 		size:              size,
 		segments:          make(map[uint64]recordSegment, len(ids)),
+		liveSSTs:          make(map[uint64]struct{}, len(liveSSTFileNos)),
 		activeFileNo:      activeFileNo,
 		nextFileNo:        nextFileNo,
 		pendingDeleteWALs: make(map[uint64]struct{}),
 		pendingDeleteSSTs: make(map[uint64]struct{}),
+	}
+	for _, fileNo := range liveSSTFileNos {
+		store.liveSSTs[fileNo] = struct{}{}
 	}
 	storeOwnedByCaller := false
 	defer func() {
@@ -206,6 +215,7 @@ func (s *segmentedRecordStore) Close() error {
 		s.walDirDirty = false
 	}
 	s.segments = nil
+	s.liveSSTs = nil
 	s.active = nil
 	s.activeFileNo = 0
 	atomic.StoreUint64(&s.nextFileNo, 0)
@@ -223,6 +233,7 @@ func (s *segmentedRecordStore) closeAfterSync() error {
 		}
 	}
 	s.segments = nil
+	s.liveSSTs = nil
 	s.active = nil
 	s.activeFileNo = 0
 	atomic.StoreUint64(&s.nextFileNo, 0)
@@ -374,18 +385,59 @@ func (s *segmentedRecordStore) compactableParquetFileNos() []uint64 {
 	defer s.mu.RUnlock()
 
 	ids := make([]uint64, 0)
-	for fileNo, segment := range s.segments {
+	for fileNo := range s.liveSSTs {
 		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
 			continue
 		}
-		if _, ok := segment.(*parquetRecordStore); ok {
-			ids = append(ids, fileNo)
-		}
+		ids = append(ids, fileNo)
 	}
 	sort.Slice(ids, func(i, j int) bool {
 		return ids[i] < ids[j]
 	})
 	return ids
+}
+
+func (s *segmentedRecordStore) markSSTLive(fileNo uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.segments[fileNo].(*parquetRecordStore); !ok {
+		return ErrManifest
+	}
+	s.liveSSTs[fileNo] = struct{}{}
+	return nil
+}
+
+func (s *segmentedRecordStore) markSSTBatchLive(fileNos []uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, fileNo := range fileNos {
+		if _, ok := s.segments[fileNo].(*parquetRecordStore); !ok {
+			return ErrManifest
+		}
+	}
+	for _, fileNo := range fileNos {
+		s.liveSSTs[fileNo] = struct{}{}
+	}
+	return nil
+}
+
+func (s *segmentedRecordStore) liveSSTFileNosForManifest() []uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	fileNos := make([]uint64, 0, len(s.liveSSTs))
+	for fileNo := range s.liveSSTs {
+		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
+			continue
+		}
+		fileNos = append(fileNos, fileNo)
+	}
+	sort.Slice(fileNos, func(i, j int) bool {
+		return fileNos[i] < fileNos[j]
+	})
+	return fileNos
 }
 
 func (s *segmentedRecordStore) scheduleWALDelete(fileNo uint64) error {
@@ -489,6 +541,7 @@ func (s *segmentedRecordStore) deletePendingSSTs() error {
 			path:    parquetSegmentPath(s.rootDir, sst.fileNo),
 		})
 		delete(s.segments, fileNo)
+		delete(s.liveSSTs, fileNo)
 		delete(s.pendingDeleteSSTs, fileNo)
 	}
 	s.mu.Unlock()
@@ -553,14 +606,9 @@ func (s *segmentedRecordStore) syncDirIfDirty() error {
 }
 
 func (s *segmentedRecordStore) openParquetSegments() error {
-	sstDir := sstSegmentsPath(s.rootDir)
-	ids, err := listParquetSegmentIDs(sstDir)
-	if err != nil {
-		return err
-	}
-	for _, id := range ids {
+	for id := range s.liveSSTs {
 		if id >= atomic.LoadUint64(&s.nextFileNo) {
-			continue
+			return ErrManifest
 		}
 		if s.segments[id] != nil {
 			return ErrManifest
@@ -574,7 +622,7 @@ func (s *segmentedRecordStore) openParquetSegments() error {
 	return nil
 }
 
-func (s *segmentedRecordStore) cleanupStartupParquetSegments(nextFileNo uint64) error {
+func (s *segmentedRecordStore) cleanupStartupParquetSegments() error {
 	sstDir := sstSegmentsPath(s.rootDir)
 	entries, err := os.ReadDir(sstDir)
 	if err != nil {
@@ -605,12 +653,7 @@ func (s *segmentedRecordStore) cleanupStartupParquetSegments(nextFileNo uint64) 
 		if err != nil {
 			return err
 		}
-		if fileNo < nextFileNo {
-			continue
-		}
-		// Dirty tail replay can install an SST whose fileNo was allocated after
-		// the last manifest commit. It is live once replay opened it.
-		if _, ok := s.segments[fileNo].(*parquetRecordStore); ok {
+		if _, live := s.liveSSTs[fileNo]; live {
 			continue
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

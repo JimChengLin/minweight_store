@@ -28,12 +28,12 @@ func BenchmarkManifestCommit(b *testing.B) {
 			b.Fatal(err)
 		}
 		nextCheckpoint++
-		nextSlot := 1
+		nextOffset := manifestRecordHeaderSize
 
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if nextSlot >= manifestSlotCount {
+			if nextOffset+manifestRecordHeaderSize > manifestSize {
 				b.StopTimer()
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					b.Fatal(err)
@@ -42,14 +42,14 @@ func BenchmarkManifestCommit(b *testing.B) {
 					b.Fatal(err)
 				}
 				nextCheckpoint++
-				nextSlot = 1
+				nextOffset = manifestRecordHeaderSize
 				b.StartTimer()
 			}
 			if err := writeManifest(path, testManifestState(nextCheckpoint)); err != nil {
 				b.Fatal(err)
 			}
 			nextCheckpoint++
-			nextSlot++
+			nextOffset += manifestRecordHeaderSize
 		}
 	})
 
@@ -61,12 +61,13 @@ func BenchmarkManifestCommit(b *testing.B) {
 			b.Fatal(err)
 		}
 		nextCheckpoint++
-		nextSeq, nextSlot := nextManifestWrite(nextSeq, 0)
+		nextSeq++
+		nextOffset := manifestRecordHeaderSize
 
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if nextSlot == 0 {
+			if nextOffset+manifestRecordHeaderSize > manifestSize {
 				b.StopTimer()
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					b.Fatal(err)
@@ -75,14 +76,19 @@ func BenchmarkManifestCommit(b *testing.B) {
 					b.Fatal(err)
 				}
 				nextCheckpoint++
-				nextSeq, nextSlot = nextManifestWrite(nextSeq, 0)
+				nextSeq++
+				nextOffset = manifestRecordHeaderSize
 				b.StartTimer()
 			}
 			file, err := os.OpenFile(path, os.O_RDWR, 0o600)
 			if err != nil {
 				b.Fatal(err)
 			}
-			firstErr := appendManifestRecord(file, testManifestState(nextCheckpoint), nextSeq, nextSlot)
+			record, err := encodeManifestRecord(testManifestState(nextCheckpoint), nextSeq)
+			if err != nil {
+				b.Fatal(err)
+			}
+			firstErr := appendManifestRecord(file, record, nextOffset)
 			if err := file.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -90,7 +96,8 @@ func BenchmarkManifestCommit(b *testing.B) {
 				b.Fatal(firstErr)
 			}
 			nextCheckpoint++
-			nextSeq, nextSlot = nextManifestWrite(nextSeq, nextSlot)
+			nextSeq++
+			nextOffset += manifestRecordHeaderSize
 		}
 	})
 
@@ -114,7 +121,7 @@ func BenchmarkManifestCommit(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if m.nextSlot == 0 {
+			if m.nextOffset+manifestRecordHeaderSize > manifestSize {
 				b.StopTimer()
 				if err := m.close(); err != nil {
 					b.Fatal(err)

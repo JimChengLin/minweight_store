@@ -83,17 +83,13 @@ func Open(dir string, options ...Options) (*Store, error) {
 				return nil, err
 			}
 		}
-		records, err := openSegmentedRecordStore(dir, cfg.WALSize, state.activeWALFileNo, state.nextFileNo)
+		records, err := openSegmentedRecordStore(dir, cfg.WALSize, state.activeWALFileNo, state.nextFileNo, state.liveSSTFileNos)
 		if err != nil {
 			return nil, err
 		}
 		opened, err = openFromManifest(dir, manifest, records, state, cfg.WALReplayPolicy)
 		if err != nil {
 			_ = records.Close()
-			return nil, err
-		}
-		if err := opened.records.cleanupStartupParquetSegments(state.nextFileNo); err != nil {
-			_ = opened.backend.close()
 			return nil, err
 		}
 	} else {
@@ -159,6 +155,9 @@ func openCleanManifest(dir string, records *segmentedRecordStore, checkpointWALF
 	if err != nil {
 		return openedStoreParts{}, err
 	}
+	if err := records.cleanupStartupParquetSegments(); err != nil {
+		return openedStoreParts{}, err
+	}
 	nodesOwnershipTransferred = true
 	return openedStoreParts{
 		backend:             backend,
@@ -187,6 +186,9 @@ func recoverManifestTail(dir string, manifest *manifest, records *segmentedRecor
 		return openedStoreParts{}, err
 	}
 	if err := replayWALIntoIndex(records, walFileNo, replayPolicy, backend.index, nil); err != nil {
+		return openedStoreParts{}, err
+	}
+	if err := records.cleanupStartupParquetSegments(); err != nil {
 		return openedStoreParts{}, err
 	}
 	checkpointWALFileNo, err := checkpointActiveWAL(dir, backend, records, manifest, state.checkpointWALFileNo, replayPolicy)
@@ -230,6 +232,9 @@ func recoverPrimaryFlushedCheckpoint(dir string, manifest *manifest, records *se
 	}
 	state.primaryWALFlushed = false
 	if err := manifest.write(state); err != nil {
+		return openedStoreParts{}, err
+	}
+	if err := records.cleanupStartupParquetSegments(); err != nil {
 		return openedStoreParts{}, err
 	}
 	nodesOwnershipTransferred = true
@@ -277,7 +282,7 @@ func rebuildFromWAL(dir string, walSize int64, policy WALReplayPolicy) (openedSt
 	if err := os.RemoveAll(primaryIndexPath(dir)); err != nil {
 		return openedStoreParts{}, err
 	}
-	records, err := openSegmentedRecordStore(dir, walSize, activeWALFileNo, nextFileNo)
+	records, err := openSegmentedRecordStore(dir, walSize, activeWALFileNo, nextFileNo, nil)
 	if err != nil {
 		return openedStoreParts{}, err
 	}

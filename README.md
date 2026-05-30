@@ -64,9 +64,10 @@ pending source WALs made obsolete by `install_sst`, fsyncs `wal/`, then writes
 switched during flush.
 
 `MANIFEST` stores `version`, `checkpoint_wal_file_no`, `active_wal_file_no`,
-`next_file_no`, `wal_segment_size`, `primary_wal_flushed`, `seq`, and a CRC.
-It is a 4KiB log of 64-byte records; normal commits append and fsync the
-manifest file, and replacement is only used when the log is full. On startup, a
+`next_file_no`, `wal_segment_size`, `primary_wal_flushed`, live SST file
+numbers, `seq`, and a CRC. It is a 1MiB variable-size log; normal commits append
+and fsync the manifest file, and replacement is only used when the log is full.
+On startup, a
 legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets
 `Open` use the primary runtime index directly: no secondary copy, no replay, and
 no startup flush. If the tail is non-empty, `Open` copies the secondary

@@ -30,9 +30,6 @@ func readManifestLog(path string) (manifestRecord, bool, error) {
 }
 
 func writeManifest(path string, state manifestState) error {
-	if err := validateManifestState(state); err != nil {
-		return err
-	}
 	latest, ok, err := readManifestLog(path)
 	if err != nil {
 		return err
@@ -40,8 +37,13 @@ func writeManifest(path string, state manifestState) error {
 	if !ok {
 		return replaceManifest(path, state, 1)
 	}
-	seq, slot := nextManifestWrite(latest.seq, latest.slot)
-	if slot == 0 {
+	seq := latest.seq + 1
+	offset := latest.offset + latest.size
+	record, err := encodeManifestRecord(state, seq)
+	if err != nil {
+		return err
+	}
+	if offset+len(record) > manifestSize {
 		return replaceManifest(path, state, seq)
 	}
 	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
@@ -49,9 +51,17 @@ func writeManifest(path string, state manifestState) error {
 		return err
 	}
 	var firstErr error
-	firstErr = appendManifestRecord(file, state, seq, slot)
+	firstErr = appendManifestRecord(file, record, offset)
 	if err := file.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
+}
+
+func replaceManifest(path string, state manifestState, seq uint64) error {
+	record, err := encodeManifestRecord(state, seq)
+	if err != nil {
+		return err
+	}
+	return replaceManifestRecord(path, record)
 }

@@ -10,39 +10,39 @@ import (
 )
 
 const (
-	manifestName              = "MANIFEST"
-	manifestVersion    uint32 = 4
-	manifestSize              = 4096
-	manifestRecordSize        = 64
-	manifestSlotCount         = manifestSize / manifestRecordSize
+	manifestName                    = "MANIFEST"
+	manifestVersion          uint32 = 5
+	manifestSize                    = 1 << 20
+	manifestRecordHeaderSize        = 64
 
 	manifestVersionOffset           = 0
-	manifestCheckpointWALNoOffset   = 4
-	manifestActiveWALNoOffset       = 12
-	manifestNextFileNoOffset        = 20
-	manifestWALSegmentSizeOffset    = 28
-	manifestPrimaryWALFlushedOffset = 36
-	manifestSeqOffset               = 40
-	manifestCRCOffset               = 48
+	manifestRecordSizeOffset        = 4
+	manifestCheckpointWALNoOffset   = 8
+	manifestActiveWALNoOffset       = 16
+	manifestNextFileNoOffset        = 24
+	manifestWALSegmentSizeOffset    = 32
+	manifestPrimaryWALFlushedOffset = 40
+	manifestLiveSSTCountOffset      = 44
+	manifestSeqOffset               = 48
+	manifestCRCOffset               = 56
+	manifestLiveSSTOffset           = manifestRecordHeaderSize
 )
 
 type manifest struct {
-	path     string
-	file     *os.File
-	nextSeq  uint64
-	nextSlot int
+	path       string
+	file       *os.File
+	nextSeq    uint64
+	nextOffset int
 }
 
 // manifestState is the payload portion of MANIFEST.
 //
 // The complete on-disk manifest is:
 //
-//	version || checkpoint_wal_file_no || active_wal_file_no ||
-//	next_file_no || wal_segment_size || primary_wal_flushed ||
-//	seq || crc32(all previous bytes)
+//	header || live_sst_file_no[]
 //
-// MANIFEST is a 4KiB fixed-size log of 64-byte records. Normal writes append
-// the next slot and fsync the file. When the log is full, write compacts by
+// MANIFEST is a 1MiB variable-size log. Normal writes append the next record
+// and fsync the file. When the next record would not fit, write compacts by
 // replacing MANIFEST with a fresh file containing only the newest record.
 //
 // It is not mutable in-memory store state. Code builds a fresh manifestState
@@ -54,6 +54,7 @@ type manifestState struct {
 	nextFileNo          uint64
 	walSegmentSize      uint64
 	primaryWALFlushed   bool
+	liveSSTFileNos      []uint64
 }
 
 func openManifest(path string) (*manifest, manifestState, bool, error) {
@@ -72,36 +73,40 @@ func openManifest(path string) (*manifest, manifestState, bool, error) {
 		return nil, manifestState{}, false, err
 	}
 
-	m.nextSeq, m.nextSlot = nextManifestWrite(record.seq, record.slot)
+	m.nextSeq = record.seq + 1
+	m.nextOffset = record.offset + record.size
 	return m, record.state, true, nil
 }
 
 func (m *manifest) write(state manifestState) error {
-	if err := validateManifestState(state); err != nil {
-		return err
-	}
 	if m.nextSeq == 0 {
 		return ErrManifest
 	}
-	seq, slot := m.nextSeq, m.nextSlot
-	if slot == 0 {
+	seq, offset := m.nextSeq, m.nextOffset
+	record, err := encodeManifestRecord(state, seq)
+	if err != nil {
+		return err
+	}
+	if m.file == nil || offset+len(record) > manifestSize {
 		if err := m.close(); err != nil {
 			return err
 		}
-		file, err := replaceManifestAndOpen(m.path, state, seq)
+		if err := replaceManifestRecord(m.path, record); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(m.path, os.O_RDWR, 0o600)
 		if err != nil {
 			return err
 		}
 		m.file = file
+		offset = 0
 	} else {
-		if m.file == nil {
-			return ErrManifest
-		}
-		if err := appendManifestRecord(m.file, state, seq, slot); err != nil {
+		if err := appendManifestRecord(m.file, record, offset); err != nil {
 			return err
 		}
 	}
-	m.nextSeq, m.nextSlot = nextManifestWrite(seq, slot)
+	m.nextSeq = seq + 1
+	m.nextOffset = offset + len(record)
 	return nil
 }
 
@@ -119,9 +124,15 @@ func (m *manifest) close() error {
 }
 
 type manifestRecord struct {
-	state manifestState
-	seq   uint64
-	slot  int
+	state  manifestState
+	seq    uint64
+	offset int
+	size   int
+}
+
+type manifestRecordMeta struct {
+	size         int
+	liveSSTCount int
 }
 
 func readManifestLogFile(file *os.File) (manifestRecord, error) {
@@ -141,38 +152,65 @@ func readManifestLogFile(file *os.File) (manifestRecord, error) {
 	}
 
 	var latest manifestRecord
-	found := false
-	for slot := 0; slot < manifestSlotCount; slot++ {
-		recordData := data[slot*manifestRecordSize : (slot+1)*manifestRecordSize]
-		if isZeroBytes(recordData) {
-			continue
+	for offset := 0; offset+manifestRecordHeaderSize <= manifestSize; {
+		if isZeroBytes(data[offset : offset+manifestRecordHeaderSize]) {
+			break
 		}
-		record, ok := decodeManifestRecord(recordData, slot)
+		record, recordSize, ok := decodeManifestRecord(data[offset:], offset)
 		if !ok {
+			if recordSize == 0 {
+				break
+			}
+			offset += recordSize
 			continue
 		}
-		if !found || record.seq > latest.seq {
+		if record.seq > latest.seq {
 			latest = record
-			found = true
 		}
+		offset += record.size
 	}
-	if !found {
+	if latest.seq == 0 {
 		return manifestRecord{}, ErrManifest
 	}
 	return latest, nil
 }
 
-func decodeManifestRecord(data []byte, slot int) (manifestRecord, bool) {
-	if version := binary.LittleEndian.Uint32(data[manifestVersionOffset : manifestVersionOffset+4]); version != manifestVersion {
-		return manifestRecord{}, false
+func manifestRecordHeader(data []byte) (manifestRecordMeta, bool) {
+	if len(data) < manifestRecordHeaderSize {
+		return manifestRecordMeta{}, false
 	}
+	if version := binary.LittleEndian.Uint32(data[manifestVersionOffset : manifestVersionOffset+4]); version != manifestVersion {
+		return manifestRecordMeta{}, false
+	}
+	recordSize := int(binary.LittleEndian.Uint32(data[manifestRecordSizeOffset : manifestRecordSizeOffset+4]))
+	if recordSize < manifestRecordHeaderSize || recordSize > len(data) {
+		return manifestRecordMeta{}, false
+	}
+	liveSSTCount := int(binary.LittleEndian.Uint32(data[manifestLiveSSTCountOffset : manifestLiveSSTCountOffset+4]))
+	if recordSize != manifestRecordHeaderSize+liveSSTCount*8 {
+		return manifestRecordMeta{}, false
+	}
+	return manifestRecordMeta{size: recordSize, liveSSTCount: liveSSTCount}, true
+}
+
+func decodeManifestRecord(data []byte, offset int) (manifestRecord, int, bool) {
+	meta, ok := manifestRecordHeader(data)
+	if !ok {
+		return manifestRecord{}, 0, false
+	}
+	recordData := data[:meta.size]
 	wantCRC := binary.LittleEndian.Uint32(data[manifestCRCOffset : manifestCRCOffset+4])
-	if gotCRC := crc32.ChecksumIEEE(data[:manifestCRCOffset]); gotCRC != wantCRC {
-		return manifestRecord{}, false
+	if gotCRC := manifestRecordCRC(recordData); gotCRC != wantCRC {
+		return manifestRecord{}, meta.size, false
 	}
 	primaryWALFlushed := binary.LittleEndian.Uint32(data[manifestPrimaryWALFlushedOffset : manifestPrimaryWALFlushedOffset+4])
 	if primaryWALFlushed > 1 {
-		return manifestRecord{}, false
+		return manifestRecord{}, meta.size, false
+	}
+	liveSSTFileNos := make([]uint64, meta.liveSSTCount)
+	for i := range liveSSTFileNos {
+		start := manifestLiveSSTOffset + i*8
+		liveSSTFileNos[i] = binary.LittleEndian.Uint64(data[start : start+8])
 	}
 	state := manifestState{
 		checkpointWALFileNo: binary.LittleEndian.Uint64(data[manifestCheckpointWALNoOffset : manifestCheckpointWALNoOffset+8]),
@@ -180,29 +218,29 @@ func decodeManifestRecord(data []byte, slot int) (manifestRecord, bool) {
 		nextFileNo:          binary.LittleEndian.Uint64(data[manifestNextFileNoOffset : manifestNextFileNoOffset+8]),
 		walSegmentSize:      binary.LittleEndian.Uint64(data[manifestWALSegmentSizeOffset : manifestWALSegmentSizeOffset+8]),
 		primaryWALFlushed:   primaryWALFlushed == 1,
+		liveSSTFileNos:      liveSSTFileNos,
 	}
 	if err := validateManifestState(state); err != nil {
-		return manifestRecord{}, false
+		return manifestRecord{}, meta.size, false
 	}
 	seq := binary.LittleEndian.Uint64(data[manifestSeqOffset : manifestSeqOffset+8])
 	if seq == 0 {
-		return manifestRecord{}, false
+		return manifestRecord{}, meta.size, false
 	}
-	return manifestRecord{state: state, seq: seq, slot: slot}, true
+	return manifestRecord{state: state, seq: seq, offset: offset, size: meta.size}, meta.size, true
 }
 
-func nextManifestWrite(seq uint64, slot int) (uint64, int) {
-	seq++
-	slot++
-	if slot >= manifestSlotCount {
-		slot = 0
+func encodeManifestRecord(state manifestState, seq uint64) ([]byte, error) {
+	if err := validateManifestState(state); err != nil {
+		return nil, err
 	}
-	return seq, slot
-}
-
-func encodeManifestRecord(state manifestState, seq uint64) [manifestRecordSize]byte {
-	var data [manifestRecordSize]byte
+	recordSize := manifestRecordHeaderSize + len(state.liveSSTFileNos)*8
+	if recordSize > manifestSize {
+		return nil, ErrManifest
+	}
+	data := make([]byte, recordSize)
 	binary.LittleEndian.PutUint32(data[manifestVersionOffset:manifestVersionOffset+4], manifestVersion)
+	binary.LittleEndian.PutUint32(data[manifestRecordSizeOffset:manifestRecordSizeOffset+4], uint32(recordSize))
 	binary.LittleEndian.PutUint64(data[manifestCheckpointWALNoOffset:manifestCheckpointWALNoOffset+8], state.checkpointWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestActiveWALNoOffset:manifestActiveWALNoOffset+8], state.activeWALFileNo)
 	binary.LittleEndian.PutUint64(data[manifestNextFileNoOffset:manifestNextFileNoOffset+8], state.nextFileNo)
@@ -210,43 +248,48 @@ func encodeManifestRecord(state manifestState, seq uint64) [manifestRecordSize]b
 	if state.primaryWALFlushed {
 		binary.LittleEndian.PutUint32(data[manifestPrimaryWALFlushedOffset:manifestPrimaryWALFlushedOffset+4], 1)
 	}
+	binary.LittleEndian.PutUint32(data[manifestLiveSSTCountOffset:manifestLiveSSTCountOffset+4], uint32(len(state.liveSSTFileNos)))
 	binary.LittleEndian.PutUint64(data[manifestSeqOffset:manifestSeqOffset+8], seq)
-	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], crc32.ChecksumIEEE(data[:manifestCRCOffset]))
-	return data
+	for i, fileNo := range state.liveSSTFileNos {
+		start := manifestLiveSSTOffset + i*8
+		binary.LittleEndian.PutUint64(data[start:start+8], fileNo)
+	}
+	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], manifestRecordCRC(data))
+	return data, nil
 }
 
-func appendManifestRecord(file *os.File, state manifestState, seq uint64, slot int) error {
-	record := encodeManifestRecord(state, seq)
-	if _, err := file.WriteAt(record[:], int64(slot*manifestRecordSize)); err != nil {
+func manifestRecordCRC(data []byte) uint32 {
+	crc := crc32.Update(0, crc32.IEEETable, data[:manifestCRCOffset])
+	var zeroCRC [4]byte
+	crc = crc32.Update(crc, crc32.IEEETable, zeroCRC[:])
+	return crc32.Update(crc, crc32.IEEETable, data[manifestCRCOffset+4:])
+}
+
+func appendManifestRecord(file *os.File, record []byte, offset int) error {
+	if _, err := file.WriteAt(record, int64(offset)); err != nil {
 		return err
 	}
 	return file.Sync()
 }
 
-func replaceManifestAndOpen(path string, state manifestState, seq uint64) (*os.File, error) {
-	if err := replaceManifest(path, state, seq); err != nil {
-		return nil, err
+func replaceManifestRecord(path string, record []byte) error {
+	if len(record) > manifestSize {
+		return ErrManifest
 	}
-	return os.OpenFile(path, os.O_RDWR, 0o600)
-}
-
-func replaceManifest(path string, state manifestState, seq uint64) error {
 	data := make([]byte, manifestSize)
-	record := encodeManifestRecord(state, seq)
-	copy(data, record[:])
+	copy(data, record)
 
 	tmp := path + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	committed := false
-	closed := false
+	removeTmp := true
 	defer func() {
-		if !committed {
-			if !closed {
-				_ = file.Close()
-			}
+		if file != nil {
+			_ = file.Close()
+		}
+		if removeTmp {
 			_ = os.Remove(tmp)
 		}
 	}()
@@ -259,14 +302,14 @@ func replaceManifest(path string, state manifestState, seq uint64) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	closed = true
+	file = nil
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	if err := syncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	committed = true
+	removeTmp = false
 	return nil
 }
 
@@ -276,6 +319,14 @@ func validateManifestState(state manifestState) error {
 	}
 	if state.walSegmentSize < walHeaderSize+walRecordHeaderSize || state.walSegmentSize > recordOffsetLimit {
 		return ErrManifest
+	}
+	for i, fileNo := range state.liveSSTFileNos {
+		if !validRecordFileNo(fileNo) || fileNo >= state.nextFileNo {
+			return ErrManifest
+		}
+		if i != 0 && state.liveSSTFileNos[i-1] >= fileNo {
+			return ErrManifest
+		}
 	}
 	return nil
 }

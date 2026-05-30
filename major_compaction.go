@@ -368,6 +368,9 @@ func (s *Store) publishInstalledSSTBatch(oldSSTFileNos []uint64, newSSTs []*parq
 			canFlush = active != nil && active.used != walHeaderSize
 		}
 		if err == nil {
+			err = s.records.markSSTBatchLive(newSSTFileNos)
+		}
+		if err == nil {
 			err = retargetMajorSSTEntries(s.records, backend.index, entries)
 		}
 		if err == nil {
@@ -456,6 +459,9 @@ func applyInstallSSTBatchRecord(records *segmentedRecordStore, index, liveIndex 
 		}); err != nil {
 			return err
 		}
+	}
+	if err := records.markSSTBatchLive(newSSTFileNos); err != nil {
+		return err
 	}
 	for _, fileNo := range oldSSTFileNos {
 		if err := records.scheduleSSTDelete(fileNo); err != nil {

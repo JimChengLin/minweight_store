@@ -9,7 +9,7 @@ func TestSegmentedRecordStoreSyncClearsWALDirDirty(t *testing.T) {
 	if err := createRecordSegmentDirs(dir); err != nil {
 		t.Fatal(err)
 	}
-	records, err := openSegmentedRecordStore(dir, 1<<20, 0, 0)
+	records, err := openSegmentedRecordStore(dir, 1<<20, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestSegmentedRecordStoreAllowsNextFileNoToSkip(t *testing.T) {
 	if err := createRecordSegmentDirs(dir); err != nil {
 		t.Fatal(err)
 	}
-	records, err := openSegmentedRecordStore(dir, 1<<20, 0, 0)
+	records, err := openSegmentedRecordStore(dir, 1<<20, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestSegmentedRecordStoreAllowsNextFileNoToSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	records, err = openSegmentedRecordStore(dir, 1<<20, firstWALSegmentNo, firstWALSegmentNo+8)
+	records, err = openSegmentedRecordStore(dir, 1<<20, firstWALSegmentNo, firstWALSegmentNo+8, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
