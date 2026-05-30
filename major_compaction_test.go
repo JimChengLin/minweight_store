@@ -37,6 +37,72 @@ func TestMajorCompactRewritesAllParquetSegments(t *testing.T) {
 	assertGet(t, store, "delta", "four")
 }
 
+func TestMajorCompactLimitsInputSSTCount(t *testing.T) {
+	dir := t.TempDir()
+	workers := 2
+	store, err := Open(dir, Options{
+		WALSize:                  crashTestWALSize,
+		MajorCompactionThreadNum: workers,
+		TargetSSTSize:            1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	store.stopMinorCompactionDispatcher()
+
+	keys := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"}
+	for _, key := range keys {
+		if err := store.Put([]byte(key), []byte(key+"-value")); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		sourceWAL := store.checkpointWALFileNo
+		compacted, err := store.minorCompactWAL(sourceWAL)
+		if err != nil || !compacted {
+			t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", sourceWAL, compacted, err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wantSelected := workers * majorCompactionMaxSSTsPerWorker
+	allSSTs := store.records.compactableParquetFileNos()
+	if len(allSSTs) != wantSelected+1 {
+		t.Fatalf("compactable parquet count = %d, want %d", len(allSSTs), wantSelected+1)
+	}
+	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selectedSSTs) != wantSelected {
+		t.Fatalf("major compaction candidate count = %d, want %d", len(selectedSSTs), wantSelected)
+	}
+	unselectedSST := allSSTs[wantSelected]
+
+	if err := store.MajorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fileNo := range selectedSSTs {
+		if fileExistsForTest(t, parquetSegmentPath(dir, fileNo)) {
+			t.Fatalf("selected parquet %d still exists after checkpoint", fileNo)
+		}
+	}
+	if !fileExistsForTest(t, parquetSegmentPath(dir, unselectedSST)) {
+		t.Fatalf("unselected parquet %d was compacted", unselectedSST)
+	}
+	for _, key := range keys {
+		assertGet(t, store, key, key+"-value")
+	}
+}
+
 func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 	dir := t.TempDir()
 	store := openMajorCompactionStoreForTest(t, dir)

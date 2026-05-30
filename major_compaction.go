@@ -30,6 +30,8 @@ type majorCompactionBuildResult struct {
 	entries []majorCompactionEntry
 }
 
+const majorCompactionMaxSSTsPerWorker = 3
+
 func (s *Store) MajorCompact() error {
 	s.compactionMu.Lock()
 	defer s.compactionMu.Unlock()
@@ -70,7 +72,12 @@ func (s *Store) majorCompactionSSTFileNos() ([]uint64, error) {
 	if s.records == nil || s.manifest == nil {
 		return nil, ErrManifest
 	}
-	return s.records.compactableParquetFileNos(), nil
+	fileNos := s.records.compactableParquetFileNos()
+	limit := s.majorCompactionThreadNum * majorCompactionMaxSSTsPerWorker
+	if limit > 0 && len(fileNos) > limit {
+		fileNos = fileNos[:limit]
+	}
+	return fileNos, nil
 }
 
 type majorCompactionKeyStream struct {
