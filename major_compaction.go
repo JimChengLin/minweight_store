@@ -47,30 +47,25 @@ func (s *Store) MajorCompact() error {
 
 func (s *Store) majorCompactionSSTFileNos() ([]uint64, error) {
 	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
+
 	_, err := s.openBackend()
 	if err != nil {
-		s.primaryMu.RUnlock()
 		return nil, err
 	}
 	if s.records == nil && s.manifest == nil {
-		s.primaryMu.RUnlock()
 		return nil, nil
 	}
 	if s.records == nil || s.manifest == nil {
-		s.primaryMu.RUnlock()
 		return nil, ErrManifest
 	}
-
-	oldSSTFileNos := s.records.compactableParquetFileNos()
-	s.primaryMu.RUnlock()
-	return oldSSTFileNos, nil
+	return s.records.compactableParquetFileNos(), nil
 }
 
 type majorCompactionKeyStream struct {
 	fileNo uint64
 	reader *parquetRecordKeyReader
 	entry  majorCompactionEntry
-	ok     bool
 }
 
 type majorCompactionKeyStreamHeap []*majorCompactionKeyStream
@@ -119,11 +114,12 @@ func (s *Store) majorCompactionKeyStreams(fileNos []uint64) (majorCompactionKeyS
 			reader: sst.newKeyReader(),
 		}
 		allStreams = append(allStreams, stream)
-		if err := stream.advance(); err != nil {
+		ok, err := stream.advance()
+		if err != nil {
 			_ = closeMajorCompactionKeyStreams(allStreams)
 			return nil, nil, err
 		}
-		if stream.ok {
+		if ok {
 			streams = append(streams, stream)
 		}
 	}
@@ -131,25 +127,23 @@ func (s *Store) majorCompactionKeyStreams(fileNos []uint64) (majorCompactionKeyS
 	return streams, allStreams, nil
 }
 
-func (s *majorCompactionKeyStream) advance() error {
+func (s *majorCompactionKeyStream) advance() (bool, error) {
 	rowIndex, key, ok, err := s.reader.next()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ok {
-		s.ok = false
-		return nil
+		return false, nil
 	}
 	oldPos, err := makeParquetRecordPosition(s.fileNo, rowIndex)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.entry = majorCompactionEntry{
 		key:    cloneBytes(key),
 		oldPos: oldPos,
 	}
-	s.ok = true
-	return nil
+	return true, nil
 }
 
 func closeMajorCompactionKeyStreams(streams []*majorCompactionKeyStream) error {
@@ -230,10 +224,11 @@ func (s *Store) buildMajorCompactionSSTs(oldSSTFileNos []uint64) ([]*parquetReco
 			currentRows++
 		}
 
-		if err := stream.advance(); err != nil {
+		ok, err = stream.advance()
+		if err != nil {
 			return stores, nil, err
 		}
-		if stream.ok {
+		if ok {
 			heap.Push(&streams, stream)
 		}
 	}
@@ -407,17 +402,11 @@ func decodeInstallSSTBatchPayload(payload []byte) ([]uint64, []uint64, error) {
 	offset := walInstallSSTBatchHeaderSize
 	for i := range oldSSTFileNos {
 		fileNo := binary.LittleEndian.Uint64(payload[offset : offset+8])
-		if !validRecordFileNo(fileNo) {
-			return nil, nil, ErrCorruptWAL
-		}
 		oldSSTFileNos[i] = fileNo
 		offset += 8
 	}
 	for i := range newSSTFileNos {
 		fileNo := binary.LittleEndian.Uint64(payload[offset : offset+8])
-		if !validRecordFileNo(fileNo) {
-			return nil, nil, ErrCorruptWAL
-		}
 		newSSTFileNos[i] = fileNo
 		offset += 8
 	}
