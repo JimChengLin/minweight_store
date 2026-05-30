@@ -138,13 +138,7 @@ func boundedWorkers(workers, jobs int) int {
 	if jobs == 0 {
 		return 0
 	}
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > jobs {
-		return jobs
-	}
-	return workers
+	return min(max(workers, 1), jobs)
 }
 
 func copyOrReplaceMmapNodeExtentFile(src, dst string) error {

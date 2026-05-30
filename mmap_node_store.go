@@ -175,9 +175,7 @@ func (s *mmapNodeStore) Alloc() (uint64, *minpatricia.NodePage, error) {
 }
 
 func (s *mmapNodeStore) firstAllocExtentIndex(start int) int {
-	if start < 0 {
-		start = 0
-	}
+	start = max(start, 0)
 	for extentID := start; extentID < len(s.extents); extentID++ {
 		extent := s.extents[extentID]
 		if extent == nil || extent.liveSlots() < mmapNodeSlotsPerExtent {
@@ -436,9 +434,7 @@ func (s *mmapNodeStore) trimReleasedExtents() {
 	if len(s.pages) > maxPages {
 		s.pages = s.pages[:maxPages]
 	}
-	if s.activeExtentIndex > len(s.extents) {
-		s.activeExtentIndex = len(s.extents)
-	}
+	s.activeExtentIndex = min(s.activeExtentIndex, len(s.extents))
 }
 
 func createMmapNodeExtent(dir string, id uint64) (*mmapNodeExtent, error) {

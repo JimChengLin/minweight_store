@@ -59,7 +59,6 @@ func BenchmarkStoreMinorCompactionDeleteOnlyWALEntries(b *testing.B) {
 
 func BenchmarkStoreMinorCompactionLiveRatio(b *testing.B) {
 	for _, scenario := range minorCompactionBenchScenarios {
-		scenario := scenario
 		b.Run(scenario.name, func(b *testing.B) {
 			data := newRecordBackendBenchDataWithValueSize(scenario.entries, scenario.valueSize)
 			benchmarkStoreMinorCompactionSourceWAL(b, data, firstWALSegmentNo, func(b *testing.B, dir string) *Store {
@@ -71,7 +70,6 @@ func BenchmarkStoreMinorCompactionLiveRatio(b *testing.B) {
 
 func BenchmarkStoreMinorCompactionWorkers(b *testing.B) {
 	for _, workers := range []int{1, 2, 4} {
-		workers := workers
 		b.Run(fmt.Sprintf("workers%d", workers), func(b *testing.B) {
 			data := newRecordBackendBenchDataWithValueSize(1_000, 32)
 			benchmarkStoreMinorCompaction(b, data, workers, prepareMinorCompactionMultiWALBenchStore)

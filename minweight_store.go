@@ -29,6 +29,7 @@ type Store struct {
 	records                  *segmentedRecordStore
 	checkpointWALFileNo      uint64
 	minorCompactionThreadNum int
+	majorCompactionThreadNum int
 	maxImmutableWALNum       int
 	targetSSTSize            int64
 	minorCompaction          *minorCompactionDispatcher

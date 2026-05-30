@@ -145,8 +145,9 @@ func openMajorCompactionStoreForTest(t *testing.T, dir string) *Store {
 	t.Helper()
 
 	store, err := Open(dir, Options{
-		WALSize:       crashTestWALSize,
-		TargetSSTSize: 1,
+		WALSize:                  crashTestWALSize,
+		MajorCompactionThreadNum: 2,
+		TargetSSTSize:            1,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -17,6 +18,16 @@ type majorCompactionEntry struct {
 	key    []byte
 	oldPos minpatricia.Position
 	newPos minpatricia.Position
+}
+
+type majorCompactionSSTGroup struct {
+	fileNos []uint64
+	bytes   int64
+}
+
+type majorCompactionBuildResult struct {
+	stores  []*parquetRecordStore
+	entries []majorCompactionEntry
 }
 
 func (s *Store) MajorCompact() error {
@@ -157,6 +168,21 @@ func closeMajorCompactionKeyStreams(streams []*majorCompactionKeyStream) error {
 }
 
 func (s *Store) buildMajorCompactionSSTs(oldSSTFileNos []uint64) ([]*parquetRecordStore, []majorCompactionEntry, error) {
+	if s.majorCompactionThreadNum <= 1 || len(oldSSTFileNos) <= 1 {
+		return s.buildMajorCompactionSSTGroup(oldSSTFileNos)
+	}
+
+	groups, err := s.majorCompactionSSTGroups(oldSSTFileNos)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(groups) <= 1 {
+		return s.buildMajorCompactionSSTGroup(oldSSTFileNos)
+	}
+	return s.buildMajorCompactionSSTGroups(groups)
+}
+
+func (s *Store) buildMajorCompactionSSTGroup(oldSSTFileNos []uint64) ([]*parquetRecordStore, []majorCompactionEntry, error) {
 	var stores []*parquetRecordStore
 	var current *parquetRecordStore
 	var currentBytes int64
@@ -238,6 +264,90 @@ func (s *Store) buildMajorCompactionSSTs(oldSSTFileNos []uint64) ([]*parquetReco
 	}
 	buildOwnedByCaller = true
 	return stores, liveEntries, nil
+}
+
+func (s *Store) majorCompactionSSTGroups(fileNos []uint64) ([]majorCompactionSSTGroup, error) {
+	sizes := make([]int64, len(fileNos))
+	var totalBytes int64
+	for i, fileNo := range fileNos {
+		info, err := os.Stat(parquetSegmentPath(s.records.rootDir, fileNo))
+		if err != nil {
+			return nil, err
+		}
+		sizes[i] = info.Size()
+		totalBytes += sizes[i]
+	}
+
+	groupCount := min(s.majorCompactionThreadNum, len(fileNos))
+	if s.targetSSTSize > 0 {
+		groupCount = min(groupCount, max(1, int(totalBytes/s.targetSSTSize)))
+	}
+	if groupCount <= 1 {
+		return []majorCompactionSSTGroup{{fileNos: fileNos, bytes: totalBytes}}, nil
+	}
+
+	targetBytes := (totalBytes + int64(groupCount) - 1) / int64(groupCount)
+	groups := make([]majorCompactionSSTGroup, 0, groupCount)
+	group := majorCompactionSSTGroup{}
+	for i, fileNo := range fileNos {
+		group.fileNos = append(group.fileNos, fileNo)
+		group.bytes += sizes[i]
+		if group.bytes >= targetBytes && len(groups)+1 < groupCount && i+1 < len(fileNos) {
+			groups = append(groups, group)
+			group = majorCompactionSSTGroup{}
+		}
+	}
+	groups = append(groups, group)
+	return groups, nil
+}
+
+func (s *Store) buildMajorCompactionSSTGroups(groups []majorCompactionSSTGroup) ([]*parquetRecordStore, []majorCompactionEntry, error) {
+	results := make([]majorCompactionBuildResult, len(groups))
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	hasErr := func() bool {
+		errMu.Lock()
+		defer errMu.Unlock()
+		return firstErr != nil
+	}
+
+	for i, group := range groups {
+		if hasErr() {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stores, entries, err := s.buildMajorCompactionSSTGroup(group.fileNos)
+			if err != nil {
+				setErr(err)
+			}
+			results[i] = majorCompactionBuildResult{
+				stores:  stores,
+				entries: entries,
+			}
+		}()
+	}
+	wg.Wait()
+
+	var stores []*parquetRecordStore
+	var entries []majorCompactionEntry
+	for _, result := range results {
+		stores = append(stores, result.stores...)
+		entries = append(entries, result.entries...)
+	}
+	if firstErr != nil {
+		return stores, nil, firstErr
+	}
+	return stores, entries, nil
 }
 
 func (s *Store) publishInstalledSSTBatch(oldSSTFileNos []uint64, newSSTs []*parquetRecordStore, entries []majorCompactionEntry) error {

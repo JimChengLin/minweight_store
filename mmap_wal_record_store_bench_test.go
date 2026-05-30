@@ -230,9 +230,7 @@ func walBenchSize(data recordBackendBenchData, batches int) int64 {
 	for i, key := range data.keys {
 		bytes += int64(walRecordHeaderSize + len(key) + len(data.values[i]))
 	}
-	if batches < 1 {
-		batches = 1
-	}
+	batches = max(batches, 1)
 	return bytes*int64(batches) + 4096
 }
 

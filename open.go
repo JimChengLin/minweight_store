@@ -14,6 +14,7 @@ type Options struct {
 	WALReplayPolicy          WALReplayPolicy
 	VerifyIndexOnRead        bool
 	MinorCompactionThreadNum int
+	MajorCompactionThreadNum int
 	MaxImmutableWALNum       int
 	TargetSSTSize            int64
 }
@@ -22,6 +23,7 @@ const (
 	defaultWALSize                  int64 = 128 * 1024 * 1024
 	defaultTargetSSTSize            int64 = 512 * 1024 * 1024
 	defaultMinorCompactionThreadNum       = 1
+	defaultMajorCompactionThreadNum       = 1
 	defaultMaxImmutableWALNum             = 1
 )
 
@@ -42,13 +44,16 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if cfg.MinorCompactionThreadNum == 0 {
 		cfg.MinorCompactionThreadNum = defaultMinorCompactionThreadNum
 	}
+	if cfg.MajorCompactionThreadNum == 0 {
+		cfg.MajorCompactionThreadNum = defaultMajorCompactionThreadNum
+	}
 	if cfg.MaxImmutableWALNum == 0 {
 		cfg.MaxImmutableWALNum = defaultMaxImmutableWALNum
 	}
 	if cfg.TargetSSTSize == 0 {
 		cfg.TargetSSTSize = defaultTargetSSTSize
 	}
-	if cfg.MinorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 || cfg.TargetSSTSize < 0 {
+	if cfg.MinorCompactionThreadNum < 0 || cfg.MajorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 || cfg.TargetSSTSize < 0 {
 		return nil, ErrOptions
 	}
 	if cfg.WALSize > int64(recordOffsetLimit) {
@@ -104,6 +109,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 		records:                  opened.records,
 		checkpointWALFileNo:      opened.checkpointWALFileNo,
 		minorCompactionThreadNum: cfg.MinorCompactionThreadNum,
+		majorCompactionThreadNum: cfg.MajorCompactionThreadNum,
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
 		targetSSTSize:            cfg.TargetSSTSize,
 	}
@@ -116,6 +122,7 @@ func defaultOptions() Options {
 	return Options{
 		WALSize:                  defaultWALSize,
 		MinorCompactionThreadNum: defaultMinorCompactionThreadNum,
+		MajorCompactionThreadNum: defaultMajorCompactionThreadNum,
 		MaxImmutableWALNum:       defaultMaxImmutableWALNum,
 		TargetSSTSize:            defaultTargetSSTSize,
 	}

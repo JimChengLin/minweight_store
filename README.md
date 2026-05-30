@@ -81,8 +81,8 @@ With a legal manifest, startup also removes valid `sst/*.parquet.tmp` files and
 uncommitted Parquet files at or above the manifest `next_file_no`, except for
 Parquet files that dirty WAL replay already installed and opened.
 Default options use a 128MiB WAL segment, `WALReplayPointInTime`,
-`VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`, and
-`MaxImmutableWALNum=1`.
+`VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`,
+`MajorCompactionThreadNum=1`, and `MaxImmutableWALNum=1`.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index

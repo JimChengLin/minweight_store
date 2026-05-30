@@ -27,15 +27,50 @@ var majorCompactionBenchScenarios = []majorCompactionBenchScenario{
 
 func BenchmarkStoreMajorCompaction(b *testing.B) {
 	for _, scenario := range majorCompactionBenchScenarios {
-		scenario := scenario
 		b.Run(scenario.name, func(b *testing.B) {
 			data := newRecordBackendBenchDataWithValueSize(scenario.ssts*scenario.entriesPerSST, scenario.valueSize)
-			benchmarkStoreMajorCompaction(b, data, scenario)
+			benchmarkStoreMajorCompaction(b, data, scenario, Options{})
 		})
 	}
 }
 
-func benchmarkStoreMajorCompaction(b *testing.B, data recordBackendBenchData, scenario majorCompactionBenchScenario) {
+func BenchmarkStoreMajorCompactionWorkers(b *testing.B) {
+	scenario := majorCompactionBenchScenario{
+		name:          "8sst/live50/entry1K/value32",
+		ssts:          8,
+		entriesPerSST: 1_000,
+		livePercent:   50,
+		valueSize:     32,
+	}
+	benchmarkStoreMajorCompactionWorkers(b, scenario, 64<<10)
+}
+
+func BenchmarkStoreMajorCompactionWorkersValue1K(b *testing.B) {
+	scenario := majorCompactionBenchScenario{
+		name:          "8sst/live50/entry256/value1K",
+		ssts:          8,
+		entriesPerSST: 256,
+		livePercent:   50,
+		valueSize:     1024,
+	}
+	benchmarkStoreMajorCompactionWorkers(b, scenario, 256<<10)
+}
+
+func benchmarkStoreMajorCompactionWorkers(b *testing.B, scenario majorCompactionBenchScenario, targetSSTSize int64) {
+	b.Helper()
+
+	data := newRecordBackendBenchDataWithValueSize(scenario.ssts*scenario.entriesPerSST, scenario.valueSize)
+	for _, workers := range []int{1, 2, 4} {
+		b.Run(fmt.Sprintf("workers%d", workers), func(b *testing.B) {
+			benchmarkStoreMajorCompaction(b, data, scenario, Options{
+				MajorCompactionThreadNum: workers,
+				TargetSSTSize:            targetSSTSize,
+			})
+		})
+	}
+}
+
+func benchmarkStoreMajorCompaction(b *testing.B, data recordBackendBenchData, scenario majorCompactionBenchScenario, options Options) {
 	b.Helper()
 
 	root := b.TempDir()
@@ -46,7 +81,7 @@ func benchmarkStoreMajorCompaction(b *testing.B, data recordBackendBenchData, sc
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		dir := filepath.Join(root, fmt.Sprintf("major-%06d", i))
-		store := prepareMajorCompactionBenchStore(b, dir, data, scenario)
+		store := prepareMajorCompactionBenchStore(b, dir, data, scenario, options)
 
 		b.StartTimer()
 		err := store.MajorCompact()
@@ -71,13 +106,11 @@ func benchmarkStoreMajorCompaction(b *testing.B, data recordBackendBenchData, sc
 	}
 }
 
-func prepareMajorCompactionBenchStore(b *testing.B, dir string, data recordBackendBenchData, scenario majorCompactionBenchScenario) *Store {
+func prepareMajorCompactionBenchStore(b *testing.B, dir string, data recordBackendBenchData, scenario majorCompactionBenchScenario, options Options) *Store {
 	b.Helper()
 
-	store, err := Open(dir, Options{
-		WALSize:            walBenchSize(data, 1),
-		MaxImmutableWALNum: 0,
-	})
+	options.WALSize = walBenchSize(data, 1)
+	store, err := Open(dir, options)
 	if err != nil {
 		b.Fatal(err)
 	}
