@@ -70,13 +70,13 @@ type majorCompactionKeyStream struct {
 
 type majorCompactionKeyStreamHeap []*majorCompactionKeyStream
 
-func (h majorCompactionKeyStreamHeap) Len() int {
-	return len(h)
+func (h *majorCompactionKeyStreamHeap) Len() int {
+	return len(*h)
 }
 
-func (h majorCompactionKeyStreamHeap) Less(i, j int) bool {
-	left := h[i].entry
-	right := h[j].entry
+func (h *majorCompactionKeyStreamHeap) Less(i, j int) bool {
+	left := (*h)[i].entry
+	right := (*h)[j].entry
 	cmp := bytes.Compare(left.key, right.key)
 	if cmp != 0 {
 		return cmp < 0
@@ -84,8 +84,8 @@ func (h majorCompactionKeyStreamHeap) Less(i, j int) bool {
 	return left.oldPos < right.oldPos
 }
 
-func (h majorCompactionKeyStreamHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
+func (h *majorCompactionKeyStreamHeap) Swap(i, j int) {
+	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
 }
 
 func (h *majorCompactionKeyStreamHeap) Push(x any) {
