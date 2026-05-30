@@ -26,6 +26,47 @@ func TestMinorCompactRetargetsCheckpointedWALToParquet(t *testing.T) {
 	assertIndexFileNoForKey(t, store, "bravo", onlyParquetFileNoForTest(t, store))
 }
 
+func TestMinorCompactRetargetRefreshesDeletedWALBoundary(t *testing.T) {
+	data := newRecordBackendBenchData(768)
+	dir := t.TempDir()
+	store, err := Open(dir, Options{
+		WALSize:            walBenchSize(data, 1),
+		MaxImmutableWALNum: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	store.stopMinorCompactionDispatcher()
+
+	for batch := 0; batch < 2; batch++ {
+		start := batch * 256
+		end := start + 256
+		for i := start; i < end; i++ {
+			if err := store.Put(data.keys[i], data.values[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		sourceWALFileNo := store.checkpointWALFileNo
+		compacted, err := store.minorCompactWAL(sourceWALFileNo)
+		if err != nil || !compacted {
+			t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", sourceWALFileNo, compacted, err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 512; i < 768; i++ {
+		if err := store.Put(data.keys[i], data.values[i]); err != nil {
+			t.Fatalf("Put(%q) after deleting compacted WAL: %v", data.keys[i], err)
+		}
+	}
+}
+
 func TestMinorCompactWritesParquetUnderSSTDir(t *testing.T) {
 	dir := t.TempDir()
 	store := openMinorCompactionStoreInDirForTest(t, dir)

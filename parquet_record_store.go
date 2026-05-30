@@ -26,6 +26,10 @@ type parquetRecord struct {
 	Value []byte `parquet:"value"`
 }
 
+type parquetRecordKey struct {
+	Key []byte `parquet:"key"`
+}
+
 type parquetRecordStore struct {
 	path         string
 	fileNo       uint64

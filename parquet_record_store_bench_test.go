@@ -24,10 +24,6 @@ type parquetRecordStoreBenchData struct {
 	values [][]byte
 }
 
-type parquetRecordKey struct {
-	Key []byte `parquet:"key"`
-}
-
 type parquetRecordValue struct {
 	Value []byte `parquet:"value"`
 }

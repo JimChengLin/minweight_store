@@ -140,7 +140,7 @@ func (s *majorCompactionKeyStream) advance() (bool, error) {
 		return false, err
 	}
 	s.entry = majorCompactionEntry{
-		key:    cloneBytes(key),
+		key:    key,
 		oldPos: oldPos,
 	}
 	return true, nil
@@ -218,6 +218,7 @@ func (s *Store) buildMajorCompactionSSTs(oldSSTFileNos []uint64) ([]*parquetReco
 			if err != nil {
 				return stores, nil, err
 			}
+			entry.key = cloneBytes(entry.key)
 			entry.newPos = newPos
 			liveEntries = append(liveEntries, entry)
 			currentBytes += entryBytes
@@ -294,12 +295,8 @@ func retargetMajorSSTEntries(records *segmentedRecordStore, index *minpatricia.I
 		if !ok || oldPos != entry.oldPos {
 			continue
 		}
-		replacedPos, replaced, err := index.Put(entry.key, entry.newPos)
-		if err != nil {
+		if err := retargetIndexPosition(index, entry.key, oldPos, entry.newPos); err != nil {
 			return err
-		}
-		if !replaced || replacedPos != oldPos {
-			return ErrCorruptIndex
 		}
 		if err := records.Free(oldPos); err != nil {
 			return err
@@ -342,12 +339,8 @@ func applyInstallSSTBatchRecord(records *segmentedRecordStore, index, liveIndex 
 			if _, ok := oldSSTs[recordPositionFileNo(oldPos)]; !ok {
 				return nil
 			}
-			replacedPos, replaced, err := index.Put(key, newPos)
-			if err != nil {
+			if err := retargetIndexPosition(index, key, oldPos, newPos); err != nil {
 				return err
-			}
-			if !replaced || replacedPos != oldPos {
-				return ErrCorruptIndex
 			}
 			return records.Free(oldPos)
 		}); err != nil {

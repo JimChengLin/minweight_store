@@ -250,12 +250,8 @@ func retargetInstalledSSTEntries(records *segmentedRecordStore, index *minpatric
 		if err != nil {
 			return err
 		}
-		replacedPos, replaced, err := index.Put(entry.key, newPos)
-		if err != nil {
+		if err := retargetIndexPosition(index, entry.key, oldPos, newPos); err != nil {
 			return err
-		}
-		if !replaced || replacedPos != oldPos {
-			return ErrCorruptIndex
 		}
 		if err := records.Free(oldPos); err != nil {
 			return err
@@ -290,12 +286,8 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 		if recordPositionFileNo(oldPos) != sourceWALFileNo {
 			return nil
 		}
-		replacedPos, replaced, err := index.Put(key, newPos)
-		if err != nil {
+		if err := retargetIndexPosition(index, key, oldPos, newPos); err != nil {
 			return err
-		}
-		if !replaced || replacedPos != oldPos {
-			return ErrCorruptIndex
 		}
 		return records.Free(oldPos)
 	}); err != nil {
