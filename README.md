@@ -88,7 +88,8 @@ uncommitted Parquet files at or above the manifest `next_file_no`, except for
 Parquet files that dirty WAL replay already installed and opened.
 Default options use a 128MiB WAL segment, `WALReplayPointInTime`,
 `VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`,
-`MajorCompactionThreadNum=1`, and `MaxImmutableWALNum=1`.
+`MajorCompactionThreadNum=1`, `MaxImmutableWALNum=1`, `TargetSSTSize=512MiB`,
+and `MaxGarbageRatioPerSST=0.2`.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index
@@ -124,11 +125,13 @@ the `install_sst` into the secondary index, and before the final
 `primary_wal_flushed=false` manifest commit.
 
 `MajorCompact` rewrites live Parquet SST segments into new Parquet segments. It
-selects live SST file numbers from the manifest-backed record store, merge-sorts
-their keys, keeps only entries whose current primary index position still points
-at the old SST position, writes those entries into new SSTs near
-`TargetSSTSize`, then appends an `install_sst_batch` WAL record (`op=4`) with
-old and new SST file numbers. The publish step marks new SSTs live, retargets
-primary index entries, and schedules old SSTs for deletion. Old SST files are
-deleted only after checkpoint replay applies the batch record to the secondary
-index and before the final `primary_wal_flushed=false` manifest commit.
+selects live SST file numbers whose manifest stats have
+`deleted_entries / total_entries >= MaxGarbageRatioPerSST` (default `0.2`), caps
+one round at `MajorCompactionThreadNum * 3` input SSTs, merge-sorts their keys,
+keeps only entries whose current primary index position still points at the old
+SST position, writes those entries into new SSTs near `TargetSSTSize`, then
+appends an `install_sst_batch` WAL record (`op=4`) with old and new SST file
+numbers. The publish step marks new SSTs live, retargets primary index entries,
+and schedules old SSTs for deletion. Old SST files are deleted only after
+checkpoint replay applies the batch record to the secondary index and before the
+final `primary_wal_flushed=false` manifest commit.

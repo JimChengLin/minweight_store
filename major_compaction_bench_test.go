@@ -18,10 +18,10 @@ type majorCompactionBenchScenario struct {
 }
 
 var majorCompactionBenchScenarios = []majorCompactionBenchScenario{
-	{name: "4sst/live100/entry256/value32", ssts: 4, entriesPerSST: 256, livePercent: 100, valueSize: 32},
+	{name: "4sst/live80/entry256/value32", ssts: 4, entriesPerSST: 256, livePercent: 80, valueSize: 32},
 	{name: "4sst/live50/entry1K/value32", ssts: 4, entriesPerSST: 1_000, livePercent: 50, valueSize: 32},
 	{name: "4sst/live10/entry1K/value32", ssts: 4, entriesPerSST: 1_000, livePercent: 10, valueSize: 32},
-	{name: "4sst/live100/entry256/value1K", ssts: 4, entriesPerSST: 256, livePercent: 100, valueSize: 1024},
+	{name: "4sst/live80/entry256/value1K", ssts: 4, entriesPerSST: 256, livePercent: 80, valueSize: 1024},
 	{name: "4sst/live10/entry1K/value1K", ssts: 4, entriesPerSST: 1_000, livePercent: 10, valueSize: 1024},
 }
 
@@ -137,13 +137,16 @@ func prepareMajorCompactionBenchStore(b *testing.B, dir string, data recordBacke
 		}
 	}
 
-	staleStart := len(data.keys) * scenario.livePercent / 100
-	for i := staleStart; i < len(data.keys); i++ {
-		if err := store.Put(data.keys[i], updatedMinorCompactionBenchValue(data.values[i])); err != nil {
-			b.Fatalf("put stale entry=%d: %v", i, err)
+	staleStartInSST := scenario.entriesPerSST * scenario.livePercent / 100
+	for sst := 0; sst < scenario.ssts; sst++ {
+		start := sst * scenario.entriesPerSST
+		for i := start + staleStartInSST; i < start+scenario.entriesPerSST; i++ {
+			if err := store.Put(data.keys[i], updatedMinorCompactionBenchValue(data.values[i])); err != nil {
+				b.Fatalf("put stale entry=%d: %v", i, err)
+			}
 		}
 	}
-	if staleStart != len(data.keys) {
+	if staleStartInSST != scenario.entriesPerSST {
 		if err := store.flush(); err != nil {
 			b.Fatalf("flush stale wal: %v", err)
 		}

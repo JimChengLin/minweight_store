@@ -46,12 +46,13 @@ type segmentedRecordStore struct {
 	// by replayed/successfully appended InstallSST records, and reduced by
 	// checkpointed SST deletes. It intentionally excludes pre-install parquet
 	// files that only exist because allocation/build reached disk.
-	liveSSTs          map[uint64]liveSSTStats
-	active            *mmapWALRecordStore
-	activeFileNo      uint64
-	nextFileNo        uint64
-	pendingDeleteWALs map[uint64]struct{}
-	pendingDeleteSSTs map[uint64]struct{}
+	liveSSTs              map[uint64]liveSSTStats
+	active                *mmapWALRecordStore
+	activeFileNo          uint64
+	nextFileNo            uint64
+	maxGarbageRatioPerSST float64
+	pendingDeleteWALs     map[uint64]struct{}
+	pendingDeleteSSTs     map[uint64]struct{}
 	// Parquet segment creation syncs sst/ in parquetRecordStore.Sync().
 	walDirDirty bool
 }
@@ -83,14 +84,15 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 	}
 
 	store := &segmentedRecordStore{
-		rootDir:           dir,
-		size:              size,
-		segments:          make(map[uint64]recordSegment, len(ids)),
-		liveSSTs:          make(map[uint64]liveSSTStats, len(liveSSTs)),
-		activeFileNo:      activeFileNo,
-		nextFileNo:        nextFileNo,
-		pendingDeleteWALs: make(map[uint64]struct{}),
-		pendingDeleteSSTs: make(map[uint64]struct{}),
+		rootDir:               dir,
+		size:                  size,
+		segments:              make(map[uint64]recordSegment, len(ids)),
+		liveSSTs:              make(map[uint64]liveSSTStats, len(liveSSTs)),
+		activeFileNo:          activeFileNo,
+		nextFileNo:            nextFileNo,
+		maxGarbageRatioPerSST: defaultMaxGarbageRatioPerSST,
+		pendingDeleteWALs:     make(map[uint64]struct{}),
+		pendingDeleteSSTs:     make(map[uint64]struct{}),
 	}
 	for _, sst := range liveSSTs {
 		store.liveSSTs[sst.fileNo] = sst.liveSSTStats
@@ -400,8 +402,11 @@ func (s *segmentedRecordStore) compactableParquetFileNos() []uint64 {
 	defer s.mu.RUnlock()
 
 	ids := make([]uint64, 0)
-	for fileNo := range s.liveSSTs {
+	for fileNo, stats := range s.liveSSTs {
 		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
+			continue
+		}
+		if !s.sstGarbageRatioReached(stats) {
 			continue
 		}
 		ids = append(ids, fileNo)
@@ -410,6 +415,16 @@ func (s *segmentedRecordStore) compactableParquetFileNos() []uint64 {
 		return ids[i] < ids[j]
 	})
 	return ids
+}
+
+func (s *segmentedRecordStore) sstGarbageRatioReached(stats liveSSTStats) bool {
+	if stats.totalEntries == 0 {
+		return true
+	}
+	if stats.deletedEntries == 0 {
+		return false
+	}
+	return float64(stats.deletedEntries)/float64(stats.totalEntries) >= s.maxGarbageRatioPerSST
 }
 
 func (s *segmentedRecordStore) markSSTLive(fileNo uint64) error {

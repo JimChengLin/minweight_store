@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1039,6 +1040,9 @@ func parquetFileNosForTest(store *Store) []uint64 {
 			fileNos = append(fileNos, id)
 		}
 	}
+	sort.Slice(fileNos, func(i, j int) bool {
+		return fileNos[i] < fileNos[j]
+	})
 	return fileNos
 }
 

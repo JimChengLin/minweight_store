@@ -17,11 +17,13 @@ type Options struct {
 	MajorCompactionThreadNum int
 	MaxImmutableWALNum       int
 	TargetSSTSize            int64
+	MaxGarbageRatioPerSST    float64
 }
 
 const (
 	defaultWALSize                  int64 = 128 * 1024 * 1024
 	defaultTargetSSTSize            int64 = 512 * 1024 * 1024
+	defaultMaxGarbageRatioPerSST          = 0.2
 	defaultMinorCompactionThreadNum       = 1
 	defaultMajorCompactionThreadNum       = 1
 	defaultMaxImmutableWALNum             = 1
@@ -53,7 +55,15 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if cfg.TargetSSTSize == 0 {
 		cfg.TargetSSTSize = defaultTargetSSTSize
 	}
-	if cfg.MinorCompactionThreadNum < 0 || cfg.MajorCompactionThreadNum < 0 || cfg.MaxImmutableWALNum < 0 || cfg.TargetSSTSize < 0 {
+	if cfg.MaxGarbageRatioPerSST == 0 {
+		cfg.MaxGarbageRatioPerSST = defaultMaxGarbageRatioPerSST
+	}
+	if cfg.MinorCompactionThreadNum < 0 ||
+		cfg.MajorCompactionThreadNum < 0 ||
+		cfg.MaxImmutableWALNum < 0 ||
+		cfg.TargetSSTSize < 0 ||
+		cfg.MaxGarbageRatioPerSST < 0 ||
+		cfg.MaxGarbageRatioPerSST > 1 {
 		return nil, ErrOptions
 	}
 	if cfg.WALSize > int64(recordOffsetLimit) {
@@ -98,6 +108,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 			return nil, err
 		}
 	}
+	opened.records.maxGarbageRatioPerSST = cfg.MaxGarbageRatioPerSST
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
 	store := &Store{
 		backend:                  opened.backend,
@@ -121,6 +132,7 @@ func defaultOptions() Options {
 		MajorCompactionThreadNum: defaultMajorCompactionThreadNum,
 		MaxImmutableWALNum:       defaultMaxImmutableWALNum,
 		TargetSSTSize:            defaultTargetSSTSize,
+		MaxGarbageRatioPerSST:    defaultMaxGarbageRatioPerSST,
 	}
 }
 

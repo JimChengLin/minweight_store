@@ -26,6 +26,9 @@ func TestOptionsDefaultMinorCompactionSettings(t *testing.T) {
 	if store.targetSSTSize != defaultTargetSSTSize {
 		t.Fatalf("targetSSTSize = %d, want %d", store.targetSSTSize, defaultTargetSSTSize)
 	}
+	if store.records.maxGarbageRatioPerSST != defaultMaxGarbageRatioPerSST {
+		t.Fatalf("maxGarbageRatioPerSST = %v, want %v", store.records.maxGarbageRatioPerSST, defaultMaxGarbageRatioPerSST)
+	}
 }
 
 func TestOptionsCustomMinorCompactionSettings(t *testing.T) {
@@ -34,6 +37,7 @@ func TestOptionsCustomMinorCompactionSettings(t *testing.T) {
 		MajorCompactionThreadNum: 4,
 		MaxImmutableWALNum:       5,
 		TargetSSTSize:            64 << 20,
+		MaxGarbageRatioPerSST:    0.3,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +56,9 @@ func TestOptionsCustomMinorCompactionSettings(t *testing.T) {
 	if store.targetSSTSize != 64<<20 {
 		t.Fatalf("targetSSTSize = %d, want %d", store.targetSSTSize, int64(64<<20))
 	}
+	if store.records.maxGarbageRatioPerSST != 0.3 {
+		t.Fatalf("maxGarbageRatioPerSST = %v, want 0.3", store.records.maxGarbageRatioPerSST)
+	}
 }
 
 func TestOptionsRejectNegativeMinorCompactionSettings(t *testing.T) {
@@ -66,5 +73,11 @@ func TestOptionsRejectNegativeMinorCompactionSettings(t *testing.T) {
 	}
 	if _, err := Open(t.TempDir(), Options{TargetSSTSize: -1}); !errors.Is(err, ErrOptions) {
 		t.Fatalf("Open negative target sst size err = %v, want %v", err, ErrOptions)
+	}
+	if _, err := Open(t.TempDir(), Options{MaxGarbageRatioPerSST: -0.1}); !errors.Is(err, ErrOptions) {
+		t.Fatalf("Open negative max garbage ratio err = %v, want %v", err, ErrOptions)
+	}
+	if _, err := Open(t.TempDir(), Options{MaxGarbageRatioPerSST: 1.1}); !errors.Is(err, ErrOptions) {
+		t.Fatalf("Open too-large max garbage ratio err = %v, want %v", err, ErrOptions)
 	}
 }
