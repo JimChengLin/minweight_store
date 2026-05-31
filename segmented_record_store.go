@@ -46,13 +46,15 @@ type segmentedRecordStore struct {
 	// by replayed/successfully appended InstallSST records, and reduced by
 	// checkpointed SST deletes. It intentionally excludes pre-install parquet
 	// files that only exist because allocation/build reached disk.
-	liveSSTs              map[uint64]liveSSTStats
-	active                *mmapWALRecordStore
-	activeFileNo          uint64
-	nextFileNo            uint64
-	maxGarbageRatioPerSST float64
-	pendingDeleteWALs     map[uint64]struct{}
-	pendingDeleteSSTs     map[uint64]struct{}
+	liveSSTs               map[uint64]liveSSTStats
+	active                 *mmapWALRecordStore
+	activeFileNo           uint64
+	nextFileNo             uint64
+	maxGarbageRatioPerSST  float64
+	compactableSSTFileNos  []uint64
+	onCompactableFileAdded func()
+	pendingDeleteWALs      map[uint64]struct{}
+	pendingDeleteSSTs      map[uint64]struct{}
 	// Parquet segment creation syncs sst/ in parquetRecordStore.Sync().
 	walDirDirty bool
 }
@@ -97,6 +99,7 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 	for _, sst := range liveSSTs {
 		store.liveSSTs[sst.fileNo] = sst.liveSSTStats
 	}
+	store.rebuildCompactableSSTs()
 	storeOwnedByCaller := false
 	defer func() {
 		if !storeOwnedByCaller {
@@ -173,19 +176,36 @@ func (s *segmentedRecordStore) Free(pos minpatricia.Position) error {
 	fileNo := recordPositionFileNo(pos)
 	rowIndex := recordPositionOffset(pos)
 
+	notifyCompactable := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	stats, ok := s.liveSSTs[fileNo]
 	if !ok {
+		s.mu.Unlock()
 		return nil
 	}
 	if rowIndex >= stats.totalEntries || stats.deletedEntries >= stats.totalEntries {
+		s.mu.Unlock()
 		return ErrManifest
 	}
 	stats.deletedEntries++
 	s.liveSSTs[fileNo] = stats
+	if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; !pendingDelete {
+		if s.addCompactableSSTWithStoreLocked(fileNo, stats) {
+			notifyCompactable = true
+		}
+	}
+	s.mu.Unlock()
+
+	if notifyCompactable && s.onCompactableFileAdded != nil {
+		s.onCompactableFileAdded()
+	}
 	return nil
+}
+
+func (s *segmentedRecordStore) setMaxGarbageRatioPerSST(ratio float64) {
+	s.maxGarbageRatioPerSST = ratio
+	s.rebuildCompactableSSTs()
 }
 
 func (s *segmentedRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
@@ -310,15 +330,7 @@ func (s *segmentedRecordStore) createParquetSegment() (*parquetRecordStore, erro
 }
 
 func (s *segmentedRecordStore) installParquetSegment(store *parquetRecordStore) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	fileNo := store.fileNo
-	if s.segments[fileNo] != nil {
-		return ErrManifest
-	}
-	s.segments[fileNo] = store
-	return nil
+	return s.installParquetSegments([]*parquetRecordStore{store})
 }
 
 func (s *segmentedRecordStore) installParquetSegments(stores []*parquetRecordStore) error {
@@ -401,20 +413,51 @@ func (s *segmentedRecordStore) compactableParquetFileNos() []uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ids := make([]uint64, 0)
+	ids := make([]uint64, len(s.compactableSSTFileNos))
+	copy(ids, s.compactableSSTFileNos)
+	return ids
+}
+
+func (s *segmentedRecordStore) rebuildCompactableSSTs() {
+	s.compactableSSTFileNos = s.compactableSSTFileNos[:0]
 	for fileNo, stats := range s.liveSSTs {
 		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
 			continue
 		}
-		if !s.sstGarbageRatioReached(stats) {
-			continue
+		if s.sstGarbageRatioReached(stats) {
+			s.compactableSSTFileNos = append(s.compactableSSTFileNos, fileNo)
 		}
-		ids = append(ids, fileNo)
 	}
-	sort.Slice(ids, func(i, j int) bool {
-		return ids[i] < ids[j]
+	sort.Slice(s.compactableSSTFileNos, func(i, j int) bool {
+		return s.compactableSSTFileNos[i] < s.compactableSSTFileNos[j]
 	})
-	return ids
+}
+
+func (s *segmentedRecordStore) addCompactableSSTWithStoreLocked(fileNo uint64, stats liveSSTStats) bool {
+	if !s.sstGarbageRatioReached(stats) {
+		return false
+	}
+	insertAt := sort.Search(len(s.compactableSSTFileNos), func(i int) bool {
+		return s.compactableSSTFileNos[i] >= fileNo
+	})
+	if insertAt < len(s.compactableSSTFileNos) && s.compactableSSTFileNos[insertAt] == fileNo {
+		return false
+	}
+	s.compactableSSTFileNos = append(s.compactableSSTFileNos, 0)
+	copy(s.compactableSSTFileNos[insertAt+1:], s.compactableSSTFileNos[insertAt:])
+	s.compactableSSTFileNos[insertAt] = fileNo
+	return true
+}
+
+func (s *segmentedRecordStore) removeCompactableSSTWithStoreLocked(fileNo uint64) {
+	removeAt := sort.Search(len(s.compactableSSTFileNos), func(i int) bool {
+		return s.compactableSSTFileNos[i] >= fileNo
+	})
+	if removeAt == len(s.compactableSSTFileNos) || s.compactableSSTFileNos[removeAt] != fileNo {
+		return
+	}
+	copy(s.compactableSSTFileNos[removeAt:], s.compactableSSTFileNos[removeAt+1:])
+	s.compactableSSTFileNos = s.compactableSSTFileNos[:len(s.compactableSSTFileNos)-1]
 }
 
 func (s *segmentedRecordStore) sstGarbageRatioReached(stats liveSSTStats) bool {
@@ -428,43 +471,40 @@ func (s *segmentedRecordStore) sstGarbageRatioReached(stats liveSSTStats) bool {
 }
 
 func (s *segmentedRecordStore) markSSTLive(fileNo uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sst, ok := s.segments[fileNo].(*parquetRecordStore)
-	if !ok {
-		return ErrManifest
-	}
-	totalEntries := uint64(sst.Len())
-	if stats, ok := s.liveSSTs[fileNo]; ok {
-		if stats.totalEntries != totalEntries {
-			return ErrManifest
-		}
-		return nil
-	}
-	s.liveSSTs[fileNo] = liveSSTStats{totalEntries: totalEntries}
-	return nil
+	return s.markSSTBatchLive([]uint64{fileNo})
 }
 
 func (s *segmentedRecordStore) markSSTBatchLive(fileNos []uint64) error {
+	notifyCompactable := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	for _, fileNo := range fileNos {
-		if _, ok := s.segments[fileNo].(*parquetRecordStore); !ok {
+		sst, ok := s.segments[fileNo].(*parquetRecordStore)
+		if !ok {
+			s.mu.Unlock()
 			return ErrManifest
 		}
-	}
-	for _, fileNo := range fileNos {
-		sst := s.segments[fileNo].(*parquetRecordStore)
 		totalEntries := uint64(sst.Len())
 		if stats, ok := s.liveSSTs[fileNo]; ok {
 			if stats.totalEntries != totalEntries {
+				s.mu.Unlock()
 				return ErrManifest
+			}
+			if s.addCompactableSSTWithStoreLocked(fileNo, stats) {
+				notifyCompactable = true
 			}
 			continue
 		}
-		s.liveSSTs[fileNo] = liveSSTStats{totalEntries: totalEntries}
+		stats := liveSSTStats{totalEntries: totalEntries}
+		s.liveSSTs[fileNo] = stats
+		if s.addCompactableSSTWithStoreLocked(fileNo, stats) {
+			notifyCompactable = true
+		}
+	}
+	s.mu.Unlock()
+
+	if notifyCompactable && s.onCompactableFileAdded != nil {
+		s.onCompactableFileAdded()
 	}
 	return nil
 }
@@ -533,6 +573,7 @@ func (s *segmentedRecordStore) scheduleSSTDeleteMaybeMissing(fileNo uint64, miss
 		return ErrManifest
 	}
 	s.pendingDeleteSSTs[fileNo] = struct{}{}
+	s.removeCompactableSSTWithStoreLocked(fileNo)
 	return nil
 }
 
@@ -592,6 +633,7 @@ func (s *segmentedRecordStore) deletePendingSSTs() error {
 		delete(s.segments, fileNo)
 		delete(s.liveSSTs, fileNo)
 		delete(s.pendingDeleteSSTs, fileNo)
+		s.removeCompactableSSTWithStoreLocked(fileNo)
 	}
 	s.mu.Unlock()
 
@@ -735,10 +777,6 @@ func listWALSegmentIDs(dir string) ([]uint64, error) {
 	return listRecordSegmentIDs(dir, walSegmentSuffix)
 }
 
-func listParquetSegmentIDs(dir string) ([]uint64, error) {
-	return listRecordSegmentIDs(dir, parquetSegmentSuffix)
-}
-
 func listRecordSegmentIDs(dir, suffix string) ([]uint64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -775,10 +813,6 @@ func parquetSegmentPath(dir string, fileNo uint64) string {
 
 func parquetSegmentName(fileNo uint64) string {
 	return fmt.Sprintf("%020d%s", fileNo, parquetSegmentSuffix)
-}
-
-func parseWALSegmentID(name string) (uint64, error) {
-	return parseRecordSegmentID(name, walSegmentSuffix)
 }
 
 func parseRecordSegmentID(name, suffix string) (uint64, error) {

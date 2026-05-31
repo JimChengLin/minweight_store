@@ -123,6 +123,10 @@ Parquet segment so the source WAL deletion still has a durable `install_sst`
 record. Pending source WALs are deleted only after a later checkpoint has replayed
 the `install_sst` into the secondary index, and before the final
 `primary_wal_flushed=false` manifest commit.
+Disk stores start a long-running minor compaction dispatcher and notify it on
+startup and after flush. Each wake processes the full current eligible WAL list;
+`MinorCompactionThreadNum` limits concurrent workers, not the number of WALs a
+single signal can cover.
 
 `MajorCompact` rewrites live Parquet SST segments into new Parquet segments. It
 selects live SST file numbers whose manifest stats have
@@ -135,3 +139,10 @@ numbers. The publish step marks new SSTs live, retargets primary index entries,
 and schedules old SSTs for deletion. Old SST files are deleted only after
 checkpoint replay applies the batch record to the secondary index and before the
 final `primary_wal_flushed=false` manifest commit.
+Disk stores also register a compactable-SST callback on the segmented record
+store. When an SST first reaches the garbage-ratio threshold (or becomes fully
+deleted/empty), the callback wakes a long-running major compaction dispatcher.
+The dispatcher runs one capped major compaction round at a time and repeats while
+more eligible SSTs remain, so one signal drains all currently eligible SSTs even
+when the first round is capped. A single eligible SST follows the same
+`install_sst_batch` path as larger groups; there is no special single-SST skip.

@@ -599,7 +599,7 @@ func openFlushBenchStoreWithTail(tb testing.TB, dir string, walSize int64, value
 func dirtyCloseFlushBenchStore(tb testing.TB, store *Store) {
 	tb.Helper()
 
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	backend := store.backend
 	store.backend = nil
 	store.manifest = nil

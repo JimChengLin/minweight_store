@@ -222,7 +222,7 @@ func openCrashProgramStore(t *testing.T, dir string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	return store
 }
 

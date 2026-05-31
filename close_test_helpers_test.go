@@ -14,6 +14,11 @@ func closeForTest(tb testing.TB, closer testCloser) {
 	}
 }
 
+func stopCompactionDispatchersForTest(store *Store) {
+	store.stopMinorCompactionDispatcher()
+	store.stopMajorCompactionDispatcher()
+}
+
 func (b *indexBackend) syncAndClose() error {
 	firstErr := b.sync()
 	var err error

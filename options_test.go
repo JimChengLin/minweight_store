@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestOptionsDefaultMinorCompactionSettings(t *testing.T) {
+func TestOptionsDefaultCompactionSettings(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestOptionsDefaultMinorCompactionSettings(t *testing.T) {
 	}
 }
 
-func TestOptionsCustomMinorCompactionSettings(t *testing.T) {
+func TestOptionsCustomCompactionSettings(t *testing.T) {
 	store, err := Open(t.TempDir(), Options{
 		MinorCompactionThreadNum: 3,
 		MajorCompactionThreadNum: 4,
@@ -61,7 +61,7 @@ func TestOptionsCustomMinorCompactionSettings(t *testing.T) {
 	}
 }
 
-func TestOptionsRejectNegativeMinorCompactionSettings(t *testing.T) {
+func TestOptionsRejectInvalidCompactionSettings(t *testing.T) {
 	if _, err := Open(t.TempDir(), Options{MinorCompactionThreadNum: -1}); !errors.Is(err, ErrOptions) {
 		t.Fatalf("Open negative minor compaction threads err = %v, want %v", err, ErrOptions)
 	}

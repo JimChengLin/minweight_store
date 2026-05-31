@@ -33,6 +33,7 @@ type Store struct {
 	maxImmutableWALNum       int
 	targetSSTSize            int64
 	minorCompaction          *minorCompactionDispatcher
+	majorCompaction          *majorCompactionDispatcher
 	fatal                    error
 }
 
@@ -207,6 +208,7 @@ func (s *Store) SeekLE(key []byte) (Item, bool, error) {
 
 func (s *Store) Close() error {
 	s.stopMinorCompactionDispatcher()
+	s.stopMajorCompactionDispatcher()
 
 	s.compactionMu.Lock()
 	defer s.compactionMu.Unlock()

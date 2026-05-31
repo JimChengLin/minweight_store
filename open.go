@@ -108,7 +108,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 			return nil, err
 		}
 	}
-	opened.records.maxGarbageRatioPerSST = cfg.MaxGarbageRatioPerSST
+	opened.records.setMaxGarbageRatioPerSST(cfg.MaxGarbageRatioPerSST)
 	opened.backend.verifyIndexOnRead = cfg.VerifyIndexOnRead
 	store := &Store{
 		backend:                  opened.backend,
@@ -120,8 +120,12 @@ func Open(dir string, options ...Options) (*Store, error) {
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
 		targetSSTSize:            cfg.TargetSSTSize,
 	}
+	opened.records.onCompactableFileAdded = store.notifyMajorCompaction
 	manifestOwnedByStore = true
+	store.startMajorCompactionDispatcher()
+	store.notifyMajorCompaction()
 	store.startMinorCompactionDispatcher()
+	store.notifyMinorCompaction()
 	return store, nil
 }
 

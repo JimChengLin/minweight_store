@@ -200,7 +200,7 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	backend := store.backend
 	store.records = nil
 	store.backend = nil
@@ -403,7 +403,7 @@ func TestOpenPrimaryWALFlushedManifestPreservesLiveSSTStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
@@ -791,7 +791,7 @@ func TestOpenBestEffortRepairsCorruptWALRecord(t *testing.T) {
 	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	backend := store.backend
 	store.records = nil
 	store.backend = nil
@@ -899,7 +899,7 @@ func corruptMiddleWAL(t *testing.T) (string, int64, minpatricia.Position, uint64
 func dirtySyncAndCloseStoreForTest(t *testing.T, store *Store) {
 	t.Helper()
 
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	backend := store.backend
 	manifest := store.manifest
 	store.records = nil
@@ -918,7 +918,7 @@ func dirtySyncAndCloseStoreForTest(t *testing.T, store *Store) {
 func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
 	t.Helper()
 
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	oldWALFileNo := store.records.activeFileNo
 	oldWAL, err := store.records.Rollover()
 	if err != nil {
@@ -948,7 +948,7 @@ func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
 func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, store *Store) {
 	t.Helper()
 
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	oldWALFileNo := store.records.activeFileNo
 	oldWAL, err := store.records.Rollover()
 	if err != nil {

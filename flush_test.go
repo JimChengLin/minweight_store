@@ -47,6 +47,7 @@ func TestWALFullFlushesAndRollsToNewSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopCompactionDispatchersForTest(store)
 
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
@@ -70,6 +71,7 @@ func TestWALFullFlushesAndRollsToNewSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopCompactionDispatchersForTest(store)
 	defer closeForTest(t, store)
 	assertGet(t, store, "alpha", "one")
 	assertGet(t, store, "bravo", "two")

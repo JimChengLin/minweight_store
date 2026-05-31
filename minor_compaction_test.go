@@ -81,11 +81,14 @@ func TestManifestTracksLiveSSTDeletedEntriesAfterTailReplay(t *testing.T) {
 	}
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	state, ok, err := readManifest(reopened.manifest.path)
@@ -137,11 +140,14 @@ func TestInstallSSTReplaySkippedRowsCountAsDeleted(t *testing.T) {
 	}
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
@@ -160,7 +166,7 @@ func TestMinorCompactRetargetRefreshesDeletedWALBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeForTest(t, store)
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 
 	for batch := 0; batch < 2; batch++ {
 		start := batch * 256
@@ -245,11 +251,14 @@ func TestMinorCompactDeletesSourceWALAfterDirtyInstallSSTReplay(t *testing.T) {
 	}
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
@@ -275,11 +284,14 @@ func TestMinorCompactDeletedSourceWALBeforeFinalManifestRecovers(t *testing.T) {
 		t.Fatal("source WAL still exists before simulated crash")
 	}
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
@@ -308,11 +320,14 @@ func TestMinorCompactFinalManifestDoesNotNeedDeletedSourceWAL(t *testing.T) {
 	}
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	assertGet(t, reopened, "alpha", "one")
@@ -332,11 +347,14 @@ func TestMinorCompactPrimaryFlushedRecoveryDeletesSourceWAL(t *testing.T) {
 	}
 	simulatePrimaryWALFlushedCheckpointForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	if walFileExistsForTest(t, dir, firstWALSegmentNo) {
@@ -367,7 +385,7 @@ func TestMinorCompactCompactsMultipleCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	defer closeForTest(t, store)
 
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
@@ -408,7 +426,7 @@ func TestMinorCompactMultipleWALFlushReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
@@ -461,11 +479,14 @@ func TestMinorCompactMultipleWALFlushReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
 	assertGet(t, reopened, "alpha", "three")
@@ -523,7 +544,7 @@ func TestMinorCompactDeleteOnlyWALPublishesEmptyParquet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +636,7 @@ func TestMinorCompactParquetTmpCrashIsCleanedOnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	assertGet(t, reopened, "alpha", "one")
 	assertGet(t, reopened, "bravo", "two")
@@ -646,7 +667,7 @@ func TestMinorCompactParquetWithoutInstallSSTIsCleanedAndReused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	if got := parquetFileNosForTest(reopened); len(got) != 0 {
 		t.Fatalf("opened parquet segments = %v, want none before install_sst", got)
@@ -689,7 +710,7 @@ func TestMinorCompactParquetBelowManifestNextFileNoWithoutInstallSSTIsCleaned(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	if got := parquetFileNosForTest(reopened); len(got) != 0 {
 		t.Fatalf("opened parquet segments = %v, want none before install_sst", got)
@@ -708,11 +729,14 @@ func TestMinorCompactUninstalledParquetCleanupAllowsWALRollover(t *testing.T) {
 	orphanFileNo, _ := buildParquetFromWALForTest(t, store, firstWALSegmentNo)
 	dirtySyncAndCloseStoreForTest(t, store)
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	if fileExistsForTest(t, parquetSegmentPath(dir, orphanFileNo)) {
 		t.Fatal("uninstalled parquet still exists after Open")
 	}
@@ -733,7 +757,7 @@ func TestMinorCompactUninstalledParquetCleanupAllowsWALRollover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	assertGet(t, reopened, "echo", "five")
 }
@@ -757,7 +781,7 @@ func TestMinorCompactUninstalledSSTWithWALFileNoIsCleaned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	if fileExistsForTest(t, parquetSegmentPath(dir, firstWALSegmentNo)) {
 		t.Fatal("uninstalled parquet with WAL fileNo still exists after Open")
@@ -861,13 +885,14 @@ func TestMinorCompactPointInTimeCleanupPreventsParquetWALFileNoCollision(t *test
 	orphanFileNo := firstUnallocatedFileNoForTest(t, dir)
 
 	store, err := Open(dir, Options{
-		WALSize:         crashTestWALSize,
-		WALReplayPolicy: WALReplayPointInTime,
+		WALSize:            crashTestWALSize,
+		WALReplayPolicy:    WALReplayPointInTime,
+		MaxImmutableWALNum: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	if fileExistsForTest(t, parquetSegmentPath(dir, orphanFileNo)) {
 		t.Fatalf("orphan parquet %d still exists after point-in-time recovery", orphanFileNo)
 	}
@@ -881,11 +906,14 @@ func TestMinorCompactPointInTimeCleanupPreventsParquetWALFileNoCollision(t *test
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	reopened, err := Open(dir, Options{
+		WALSize:            crashTestWALSize,
+		MaxImmutableWALNum: 100,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 	assertGet(t, reopened, "alpha", "one")
 	assertGet(t, reopened, "bravo", "two")
@@ -980,7 +1008,7 @@ func openMinorCompactionStoreInDirForTest(t *testing.T, dir string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
@@ -1182,7 +1210,7 @@ func compactWithCorruptInstallSSTForTest(t *testing.T) string {
 func simulateCheckpointAfterPendingWALDeleteBeforeManifestForTest(t *testing.T, store *Store) {
 	t.Helper()
 
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	oldWALFileNo := store.records.activeFileNo
 	oldWAL, err := store.records.Rollover()
 	if err != nil {

@@ -203,7 +203,7 @@ func prepareMinorCompactionMultiWALBenchStore(b *testing.B, dir string, data rec
 	if err != nil {
 		b.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 	for batch := 0; batch < 4; batch++ {
 		for i, key := range data.keys {
 			value := data.values[i]

@@ -114,7 +114,7 @@ func prepareMajorCompactionBenchStore(b *testing.B, dir string, data recordBacke
 	if err != nil {
 		b.Fatal(err)
 	}
-	store.stopMinorCompactionDispatcher()
+	stopCompactionDispatchersForTest(store)
 
 	for sst := 0; sst < scenario.ssts; sst++ {
 		start := sst * scenario.entriesPerSST
