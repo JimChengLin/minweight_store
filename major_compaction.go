@@ -482,13 +482,6 @@ func applyInstallSSTBatchRecord(records *segmentedRecordStore, index, liveIndex 
 	if err := records.markSSTBatchLive(newSSTFileNos); err != nil {
 		return err
 	}
-	countStats := liveIndex == nil
-	freeIfCountingStats := func(pos minpatricia.Position) error {
-		if !countStats {
-			return nil
-		}
-		return records.Free(pos)
-	}
 
 	for _, sstFileNo := range newSSTFileNos {
 		sst, err := records.parquetSegment(sstFileNo)
@@ -508,21 +501,29 @@ func applyInstallSSTBatchRecord(records *segmentedRecordStore, index, liveIndex 
 				if !ok || livePos != newPos {
 					return nil
 				}
+				oldPos, ok, err := index.Probe(key)
+				if err != nil || !ok {
+					return err
+				}
+				if _, ok := oldSSTs[recordPositionFileNo(oldPos)]; !ok {
+					return nil
+				}
+				return retargetIndexPosition(index, key, oldPos, newPos)
 			}
 			oldPos, ok, err := index.Get(key)
 			if err != nil {
 				return err
 			}
 			if !ok {
-				return freeIfCountingStats(newPos)
+				return records.Free(newPos)
 			}
 			if _, ok := oldSSTs[recordPositionFileNo(oldPos)]; !ok {
-				return freeIfCountingStats(newPos)
+				return records.Free(newPos)
 			}
 			if err := retargetIndexPosition(index, key, oldPos, newPos); err != nil {
 				return err
 			}
-			return freeIfCountingStats(oldPos)
+			return records.Free(oldPos)
 		}); err != nil {
 			return err
 		}

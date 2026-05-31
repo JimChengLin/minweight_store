@@ -291,13 +291,6 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 	if err := records.markSSTLive(sstFileNo); err != nil {
 		return err
 	}
-	countStats := liveIndex == nil
-	freeIfCountingStats := func(pos minpatricia.Position) error {
-		if !countStats {
-			return nil
-		}
-		return records.Free(pos)
-	}
 	if err := sst.scanKeys(func(rowIndex uint64, key []byte) error {
 		newPos, err := makeParquetRecordPosition(sstFileNo, rowIndex)
 		if err != nil {
@@ -311,18 +304,26 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 			if !ok || livePos != newPos {
 				return nil
 			}
+			oldPos, ok, err := index.Probe(key)
+			if err != nil {
+				return err
+			}
+			if !ok || recordPositionFileNo(oldPos) != sourceWALFileNo {
+				return nil
+			}
+			return retargetIndexPosition(index, key, oldPos, newPos)
 		}
 		oldPos, ok, err := index.Get(key)
 		if err != nil {
 			return err
 		}
 		if !ok || recordPositionFileNo(oldPos) != sourceWALFileNo {
-			return freeIfCountingStats(newPos)
+			return records.Free(newPos)
 		}
 		if err := retargetIndexPosition(index, key, oldPos, newPos); err != nil {
 			return err
 		}
-		return freeIfCountingStats(oldPos)
+		return records.Free(oldPos)
 	}); err != nil {
 		return err
 	}
