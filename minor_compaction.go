@@ -298,18 +298,12 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 		}
 		if liveIndex != nil {
 			livePos, ok, err := liveIndex.Probe(key)
-			if err != nil {
+			if err != nil || !ok || livePos != newPos {
 				return err
-			}
-			if !ok || livePos != newPos {
-				return nil
 			}
 			oldPos, ok, err := index.Probe(key)
-			if err != nil {
+			if err != nil || !ok || recordPositionFileNo(oldPos) != sourceWALFileNo {
 				return err
-			}
-			if !ok || recordPositionFileNo(oldPos) != sourceWALFileNo {
-				return nil
 			}
 			return retargetIndexPosition(index, key, oldPos, newPos)
 		}

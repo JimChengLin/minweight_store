@@ -297,11 +297,8 @@ func (s *parquetRecordStore) scanKeys(fn func(rowIndex uint64, key []byte) error
 	}()
 	for {
 		rowIndex, key, ok, err := reader.next()
-		if err != nil {
+		if err != nil || !ok {
 			return err
-		}
-		if !ok {
-			return nil
 		}
 		if err := fn(rowIndex, key); err != nil {
 			return err

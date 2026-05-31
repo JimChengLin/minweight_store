@@ -5,7 +5,6 @@ package minweight_store
 import (
 	"errors"
 	"sync"
-	"time"
 )
 
 type compactionDispatcher struct {
@@ -54,12 +53,10 @@ func (s *Store) runCompactionDispatcher(d *compactionDispatcher, name string, co
 		d.pending = false
 		d.mu.Unlock()
 
-		start := time.Now()
 		err := compact()
 		if err != nil {
 			logError(s.logger, "compaction_dispatcher_error", err,
 				"name", name,
-				"duration", time.Since(start),
 			)
 			if !errors.Is(err, ErrClosed) {
 				_ = s.mayMarkFatal(err)

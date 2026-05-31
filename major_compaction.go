@@ -495,11 +495,8 @@ func applyInstallSSTBatchRecord(records *segmentedRecordStore, index, liveIndex 
 			}
 			if liveIndex != nil {
 				livePos, ok, err := liveIndex.Probe(key)
-				if err != nil {
+				if err != nil || !ok || livePos != newPos {
 					return err
-				}
-				if !ok || livePos != newPos {
-					return nil
 				}
 				oldPos, ok, err := index.Probe(key)
 				if err != nil || !ok {

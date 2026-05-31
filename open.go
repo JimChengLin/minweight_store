@@ -426,11 +426,8 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 		case walOpPut:
 			if liveIndex != nil {
 				livePos, ok, err := liveIndex.Probe(key)
-				if err != nil {
+				if err != nil || !ok || livePos != pos {
 					return err
-				}
-				if !ok || livePos != pos {
-					return nil
 				}
 			}
 			old, replaced, err := index.Put(key, pos)
