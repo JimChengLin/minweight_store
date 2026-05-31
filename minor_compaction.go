@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -28,6 +29,11 @@ func (s *Store) minorCompact() error {
 	if len(candidates) == 0 {
 		return nil
 	}
+	start := time.Now()
+	logInfo(s.logger, "minor_compaction_start",
+		"candidate_wal_count", len(candidates),
+		"workers", s.minorCompactionThreadNum,
+	)
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	var firstErr error
@@ -65,6 +71,10 @@ func (s *Store) minorCompact() error {
 		}(fileNo)
 	}
 	wg.Wait()
+	logInfo(s.logger, "minor_compaction_done",
+		"candidate_wal_count", len(candidates),
+		"duration", time.Since(start),
+	)
 	return firstErr
 }
 
@@ -85,11 +95,17 @@ func (s *Store) minorCompactionCandidates() ([]uint64, error) {
 }
 
 func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {
+	start := time.Now()
 	candidates, hasKVRecord, err := sortedWALPutCompactionCandidates(s.records, sourceWALFileNo)
 	if err != nil {
 		return false, err
 	}
 	if !hasKVRecord {
+		logInfo(s.logger, "minor_compaction_wal_skip",
+			"source_wal_file_no", sourceWALFileNo,
+			"reason", "no_kv_record",
+			"duration", time.Since(start),
+		)
 		return false, nil
 	}
 
@@ -149,6 +165,13 @@ func (s *Store) minorCompactWAL(sourceWALFileNo uint64) (bool, error) {
 	if err := s.publishInstalledSST(sourceWALFileNo, parquetStore.fileNo, liveCandidates); err != nil {
 		return false, err
 	}
+	logInfo(s.logger, "minor_compaction_wal_done",
+		"source_wal_file_no", sourceWALFileNo,
+		"sst_file_no", parquetStore.fileNo,
+		"put_candidate_count", len(candidates),
+		"live_candidate_count", len(liveCandidates),
+		"duration", time.Since(start),
+	)
 	return true, nil
 }
 

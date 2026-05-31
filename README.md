@@ -90,6 +90,14 @@ Default options use a 128MiB WAL segment, `WALReplayPointInTime`,
 `VerifyIndexOnRead=false`, `MinorCompactionThreadNum=1`,
 `MajorCompactionThreadNum=1`, `MaxImmutableWALNum=1`, `TargetSSTSize=512MiB`,
 and `MaxGarbageRatioPerSST=0.2`.
+Disk stores append structured `log/slog` text logs to `db/LOG` by default.
+Pass `Options.Logger` to route those events to a caller-owned logger instead.
+The default `db/LOG` file rotates before a write would cross 64MiB, renames old
+files to `LOG.YYYYMMDD-HHMMSS.ffffff.<pid>`, and keeps the newest 8 archives.
+Logged events are intentionally low-frequency: open/recovery, flush/checkpoint,
+WAL-full flush triggers, minor compaction, major compaction, dispatcher errors,
+and fatal store transitions. Ordinary point reads and writes do not log unless
+they hit a WAL-full flush boundary.
 Without a manifest, the WAL directory must be empty, contain only WAL segment
 1, or contain WAL segment 1 followed by an empty segment 2 left by a crashed
 rollover. Startup drops that empty segment and rebuilds/syncs the primary index

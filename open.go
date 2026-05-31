@@ -3,8 +3,10 @@
 package minweight_store
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -18,6 +20,7 @@ type Options struct {
 	MaxImmutableWALNum       int
 	TargetSSTSize            int64
 	MaxGarbageRatioPerSST    float64
+	Logger                   *slog.Logger
 }
 
 const (
@@ -30,6 +33,7 @@ const (
 )
 
 func Open(dir string, options ...Options) (*Store, error) {
+	start := time.Now()
 	cfg := defaultOptions()
 	customWALSize := false
 	if len(options) != 0 {
@@ -72,6 +76,21 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
+	logger, loggerWriter, err := openStoreLogger(dir, cfg.Logger)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Logger = logger
+	loggerWriterOwnedByStore := false
+	defer func() {
+		if !loggerWriterOwnedByStore && loggerWriter != nil {
+			_ = loggerWriter.Close()
+		}
+	}()
+	logInfo(cfg.Logger, "open_start",
+		"dir", dir,
+		"wal_size", cfg.WALSize,
+	)
 	manifest, state, hasLegalManifest, err := openManifest(filepath.Join(dir, manifestName))
 	if err != nil {
 		return nil, err
@@ -97,12 +116,24 @@ func Open(dir string, options ...Options) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
+		logInfo(cfg.Logger, "open_manifest_state",
+			"primary_wal_flushed", state.primaryWALFlushed,
+			"checkpoint_wal_file_no", state.checkpointWALFileNo,
+			"active_wal_file_no", state.activeWALFileNo,
+			"active_wal_used", records.activeSegment().used,
+			"next_file_no", state.nextFileNo,
+			"wal_size", cfg.WALSize,
+			"live_sst_count", len(state.liveSSTs),
+		)
 		opened, err = openFromManifest(dir, manifest, records, state, cfg.WALReplayPolicy)
 		if err != nil {
 			_ = records.Close()
 			return nil, err
 		}
 	} else {
+		logInfo(cfg.Logger, "open_rebuild_from_wal",
+			"wal_size", cfg.WALSize,
+		)
 		opened, err = rebuildFromWAL(dir, cfg.WALSize, cfg.WALReplayPolicy)
 		if err != nil {
 			return nil, err
@@ -119,9 +150,17 @@ func Open(dir string, options ...Options) (*Store, error) {
 		majorCompactionThreadNum: cfg.MajorCompactionThreadNum,
 		maxImmutableWALNum:       cfg.MaxImmutableWALNum,
 		targetSSTSize:            cfg.TargetSSTSize,
+		logger:                   cfg.Logger,
+		loggerWriter:             loggerWriter,
 	}
 	opened.records.onCompactableFileAdded = store.notifyMajorCompaction
 	manifestOwnedByStore = true
+	loggerWriterOwnedByStore = true
+	logInfo(cfg.Logger, "open_done",
+		"checkpoint_wal_file_no", store.checkpointWALFileNo,
+		"wal_size", store.records.size,
+		"duration", time.Since(start),
+	)
 	store.startMajorCompactionDispatcher()
 	store.notifyMajorCompaction()
 	store.startMinorCompactionDispatcher()

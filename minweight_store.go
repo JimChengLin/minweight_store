@@ -3,6 +3,7 @@ package minweight_store
 import (
 	"bytes"
 	"errors"
+	"log/slog"
 	"sync"
 )
 
@@ -32,6 +33,8 @@ type Store struct {
 	majorCompactionThreadNum int
 	maxImmutableWALNum       int
 	targetSSTSize            int64
+	logger                   *slog.Logger
+	loggerWriter             *rotatingLogWriter
 	minorCompaction          *compactionDispatcher
 	majorCompaction          *compactionDispatcher
 	fatal                    error
@@ -84,6 +87,9 @@ func (s *Store) Put(key, value []byte) error {
 			if !canFlush {
 				return err
 			}
+			logInfo(s.logger, "wal_full_flush",
+				"op", "put",
+			)
 			if flushErr := s.flush(); flushErr != nil {
 				return s.mayMarkFatal(flushErr)
 			}
@@ -128,6 +134,9 @@ func (s *Store) Delete(key []byte) (bool, error) {
 			if !canFlush {
 				return deleted, err
 			}
+			logInfo(s.logger, "wal_full_flush",
+				"op", "delete",
+			)
 			if flushErr := s.flush(); flushErr != nil {
 				return deleted, s.mayMarkFatal(flushErr)
 			}
@@ -235,9 +244,11 @@ func (s *Store) Close() error {
 
 	backend := s.backend
 	manifest := s.manifest
+	loggerWriter := s.loggerWriter
 	s.backend = nil
 	s.manifest = nil
 	s.records = nil
+	s.loggerWriter = nil
 	s.primaryMu.Unlock()
 
 	var closeErr error
@@ -251,6 +262,11 @@ func (s *Store) Close() error {
 	}
 	if manifest != nil {
 		if err := manifest.close(); err != nil {
+			firstErr = errors.Join(firstErr, err)
+		}
+	}
+	if loggerWriter != nil {
+		if err := loggerWriter.Close(); err != nil {
 			firstErr = errors.Join(firstErr, err)
 		}
 	}
@@ -290,6 +306,7 @@ func (s *Store) mayMarkFatal(err error) error {
 		return s.fatal
 	}
 	s.fatal = errors.Join(ErrFatal, err)
+	logError(s.logger, "store_fatal", err)
 	return s.fatal
 }
 

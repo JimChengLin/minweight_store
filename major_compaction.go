@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -50,6 +51,7 @@ func (s *Store) majorCompactOnce() (bool, error) {
 		return false, err
 	}
 
+	start := time.Now()
 	newSSTs, liveEntries, err := s.buildMajorCompactionSSTs(oldSSTFileNos)
 	newSSTsOwnedByRecords := false
 	defer func() {
@@ -58,15 +60,37 @@ func (s *Store) majorCompactOnce() (bool, error) {
 		}
 	}()
 	if err != nil {
+		logError(s.logger, "major_compaction_round_error", err,
+			"old_sst_count", len(oldSSTFileNos),
+			"duration", time.Since(start),
+		)
 		return false, err
 	}
 	if err := s.records.installParquetSegments(newSSTs); err != nil {
+		logError(s.logger, "major_compaction_round_error", err,
+			"old_sst_count", len(oldSSTFileNos),
+			"new_sst_count", len(newSSTs),
+			"duration", time.Since(start),
+		)
 		return false, err
 	}
 	newSSTsOwnedByRecords = true
 	if err := s.publishInstalledSSTBatch(oldSSTFileNos, newSSTs, liveEntries); err != nil {
+		logError(s.logger, "major_compaction_round_error", err,
+			"old_sst_count", len(oldSSTFileNos),
+			"new_sst_count", len(newSSTs),
+			"live_entry_count", len(liveEntries),
+			"duration", time.Since(start),
+		)
 		return false, err
 	}
+	logInfo(s.logger, "major_compaction_round_done",
+		"old_sst_count", len(oldSSTFileNos),
+		"new_sst_count", len(newSSTs),
+		"live_entry_count", len(liveEntries),
+		"has_more", hasMore,
+		"duration", time.Since(start),
+	)
 	return hasMore, nil
 }
 

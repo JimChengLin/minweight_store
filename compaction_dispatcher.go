@@ -5,6 +5,7 @@ package minweight_store
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 type compactionDispatcher struct {
@@ -38,7 +39,7 @@ func (d *compactionDispatcher) notify() {
 	d.mu.Unlock()
 }
 
-func (s *Store) runCompactionDispatcher(d *compactionDispatcher, compact func() error) {
+func (s *Store) runCompactionDispatcher(d *compactionDispatcher, name string, compact func() error) {
 	defer d.wg.Done()
 
 	for {
@@ -53,8 +54,13 @@ func (s *Store) runCompactionDispatcher(d *compactionDispatcher, compact func() 
 		d.pending = false
 		d.mu.Unlock()
 
+		start := time.Now()
 		err := compact()
 		if err != nil {
+			logError(s.logger, "compaction_dispatcher_error", err,
+				"name", name,
+				"duration", time.Since(start),
+			)
 			if !errors.Is(err, ErrClosed) {
 				_ = s.mayMarkFatal(err)
 			}

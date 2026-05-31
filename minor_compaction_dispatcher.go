@@ -11,7 +11,7 @@ func (s *Store) startMinorCompactionDispatcher() {
 	d.wg.Add(1)
 	s.minorCompaction = d
 
-	go s.runCompactionDispatcher(d, s.minorCompact)
+	go s.runCompactionDispatcher(d, "minor_compaction", s.minorCompact)
 }
 
 func (s *Store) stopMinorCompactionDispatcher() {

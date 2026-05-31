@@ -5,6 +5,7 @@ package minweight_store
 import (
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -27,6 +28,12 @@ func (s *Store) flushWithSecondaryLocked() error {
 		// Empty WAL is a valid idempotent flush: there is no new checkpoint progress.
 		return nil
 	}
+	start := time.Now()
+	logInfo(s.logger, "flush_start",
+		"active_wal_file_no", active.fileNo,
+		"active_wal_used", active.used,
+		"checkpoint_wal_file_no", s.checkpointWALFileNo,
+	)
 	checkpointWALFileNo, err := checkpointActiveWAL(
 		s.manifest.dir(),
 		backend,
@@ -36,9 +43,17 @@ func (s *Store) flushWithSecondaryLocked() error {
 		WALReplayStrict,
 	)
 	if err != nil {
+		logError(s.logger, "flush_error", err,
+			"active_wal_file_no", active.fileNo,
+			"duration", time.Since(start),
+		)
 		return err
 	}
 	s.checkpointWALFileNo = checkpointWALFileNo
+	logInfo(s.logger, "flush_done",
+		"checkpoint_wal_file_no", checkpointWALFileNo,
+		"duration", time.Since(start),
+	)
 	return nil
 }
 
@@ -99,6 +114,12 @@ func (s *Store) closeCheckpointWithPrimaryLocked() error {
 		return nil
 	}
 
+	start := time.Now()
+	logInfo(s.logger, "close_checkpoint_start",
+		"active_wal_file_no", active.fileNo,
+		"active_wal_used", active.used,
+		"checkpoint_wal_file_no", s.checkpointWALFileNo,
+	)
 	checkpointWALFileNo, err := checkpointActiveWAL(
 		s.manifest.dir(),
 		s.backend,
@@ -108,9 +129,17 @@ func (s *Store) closeCheckpointWithPrimaryLocked() error {
 		WALReplayStrict,
 	)
 	if err != nil {
+		logError(s.logger, "close_checkpoint_error", err,
+			"active_wal_file_no", active.fileNo,
+			"duration", time.Since(start),
+		)
 		return err
 	}
 	s.checkpointWALFileNo = checkpointWALFileNo
+	logInfo(s.logger, "close_checkpoint_done",
+		"checkpoint_wal_file_no", checkpointWALFileNo,
+		"duration", time.Since(start),
+	)
 	return nil
 }
 

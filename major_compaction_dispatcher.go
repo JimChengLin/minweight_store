@@ -11,7 +11,7 @@ func (s *Store) startMajorCompactionDispatcher() {
 	d.wg.Add(1)
 	s.majorCompaction = d
 
-	go s.runCompactionDispatcher(d, s.MajorCompact)
+	go s.runCompactionDispatcher(d, "major_compaction", s.MajorCompact)
 }
 
 func (s *Store) stopMajorCompactionDispatcher() {
