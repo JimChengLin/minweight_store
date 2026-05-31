@@ -1,0 +1,5 @@
+*.test
+*.prof
+*.pprof
+*.out
+results/
