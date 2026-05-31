@@ -2,7 +2,11 @@
 
 package minweight_store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/JimChengLin/minpatricia"
+)
 
 func TestMajorCompactRewritesAllParquetSegments(t *testing.T) {
 	dir := t.TempDir()
@@ -29,6 +33,21 @@ func TestMajorCompactRewritesAllParquetSegments(t *testing.T) {
 	for _, fileNo := range oldSSTs {
 		if fileExistsForTest(t, parquetSegmentPath(dir, fileNo)) {
 			t.Fatalf("old parquet %d still exists after checkpoint", fileNo)
+		}
+	}
+	liveStats := manifestLiveSSTStatsForTest(t, store.manifest.path)
+	for _, fileNo := range oldSSTs {
+		if _, ok := liveStats[fileNo]; ok {
+			t.Fatalf("old parquet %d still live in manifest after checkpoint", fileNo)
+		}
+	}
+	for _, fileNo := range newSSTs {
+		stats, ok := liveStats[fileNo]
+		if !ok {
+			t.Fatalf("new parquet %d missing from manifest", fileNo)
+		}
+		if stats.totalEntries != 1 || stats.deletedEntries != 0 {
+			t.Fatalf("new parquet %d stats = total %d deleted %d, want 1,0", fileNo, stats.totalEntries, stats.deletedEntries)
 		}
 	}
 	assertGet(t, store, "alpha", "one")
@@ -132,7 +151,60 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 			t.Fatalf("old parquet %d still exists after recovery", fileNo)
 		}
 	}
+	liveStats := manifestLiveSSTStatsForTest(t, reopened.manifest.path)
+	for _, fileNo := range oldSSTs {
+		if _, ok := liveStats[fileNo]; ok {
+			t.Fatalf("old parquet %d still live in manifest after recovery", fileNo)
+		}
+	}
+	for _, fileNo := range newSSTs {
+		stats, ok := liveStats[fileNo]
+		if !ok {
+			t.Fatalf("new parquet %d missing from manifest after recovery", fileNo)
+		}
+		if stats.totalEntries != 1 || stats.deletedEntries != 0 {
+			t.Fatalf("new parquet %d stats after recovery = total %d deleted %d, want 1,0", fileNo, stats.totalEntries, stats.deletedEntries)
+		}
+	}
 	assertGet(t, reopened, "alpha", "one")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+	assertGet(t, reopened, "delta", "four")
+}
+
+func TestInstallSSTBatchReplaySkippedRowsCountAsDeleted(t *testing.T) {
+	dir := t.TempDir()
+	store := openMajorCompactionStoreForTest(t, dir)
+	oldSSTs := parquetFileNosForTest(store)
+	newSSTs, entries, err := store.buildMajorCompactionSSTs(oldSSTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.records.installParquetSegments(newSSTs); err != nil {
+		t.Fatal(err)
+	}
+	alphaNewPos := majorCompactionEntryPosForTest(t, entries, "alpha")
+	alphaNewSSTFileNo := recordPositionFileNo(alphaNewPos)
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.records.AppendInstallSSTBatchRecord(oldSSTs, parquetStoreFileNos(newSSTs)); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{
+		WALSize:       crashTestWALSize,
+		TargetSSTSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, alphaNewSSTFileNo, 1, 1)
+	assertGet(t, reopened, "alpha", "updated")
 	assertGet(t, reopened, "bravo", "two")
 	assertGet(t, reopened, "charlie", "three")
 	assertGet(t, reopened, "delta", "four")
@@ -309,4 +381,16 @@ func assertNoFileNoOverlapForTest(t *testing.T, oldFileNos, newFileNos []uint64)
 			t.Fatalf("fileNo %d appears in both old and new sets", fileNo)
 		}
 	}
+}
+
+func majorCompactionEntryPosForTest(t *testing.T, entries []majorCompactionEntry, key string) minpatricia.Position {
+	t.Helper()
+
+	for _, entry := range entries {
+		if string(entry.key) == key {
+			return entry.newPos
+		}
+	}
+	t.Fatalf("major compaction entry for %s missing", key)
+	return 0
 }

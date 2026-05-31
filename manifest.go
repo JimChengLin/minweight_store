@@ -11,9 +11,10 @@ import (
 
 const (
 	manifestName                    = "MANIFEST"
-	manifestVersion          uint32 = 5
+	manifestVersion          uint32 = 6
 	manifestSize                    = 1 << 20
 	manifestRecordHeaderSize        = 64
+	manifestLiveSSTEntrySize        = 24
 
 	manifestVersionOffset           = 0
 	manifestRecordSizeOffset        = 4
@@ -39,7 +40,7 @@ type manifest struct {
 //
 // The complete on-disk manifest is:
 //
-//	header || live_sst_file_no[]
+//	header || live_sst_entry[]
 //
 // MANIFEST is a 1MiB variable-size log. Normal writes append the next record
 // and fsync the file. When the next record would not fit, write compacts by
@@ -54,7 +55,17 @@ type manifestState struct {
 	nextFileNo          uint64
 	walSegmentSize      uint64
 	primaryWALFlushed   bool
-	liveSSTFileNos      []uint64
+	liveSSTs            []manifestLiveSST
+}
+
+type liveSSTStats struct {
+	totalEntries   uint64
+	deletedEntries uint64
+}
+
+type manifestLiveSST struct {
+	fileNo uint64
+	liveSSTStats
 }
 
 func openManifest(path string) (*manifest, manifestState, bool, error) {
@@ -187,7 +198,7 @@ func manifestRecordHeader(data []byte) (manifestRecordMeta, bool) {
 		return manifestRecordMeta{}, false
 	}
 	liveSSTCount := int(binary.LittleEndian.Uint32(data[manifestLiveSSTCountOffset : manifestLiveSSTCountOffset+4]))
-	if recordSize != manifestRecordHeaderSize+liveSSTCount*8 {
+	if recordSize != manifestRecordHeaderSize+liveSSTCount*manifestLiveSSTEntrySize {
 		return manifestRecordMeta{}, false
 	}
 	return manifestRecordMeta{size: recordSize, liveSSTCount: liveSSTCount}, true
@@ -207,10 +218,16 @@ func decodeManifestRecord(data []byte, offset int) (manifestRecord, int, bool) {
 	if primaryWALFlushed > 1 {
 		return manifestRecord{}, meta.size, false
 	}
-	liveSSTFileNos := make([]uint64, meta.liveSSTCount)
-	for i := range liveSSTFileNos {
-		start := manifestLiveSSTOffset + i*8
-		liveSSTFileNos[i] = binary.LittleEndian.Uint64(data[start : start+8])
+	liveSSTs := make([]manifestLiveSST, meta.liveSSTCount)
+	for i := range liveSSTs {
+		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
+		liveSSTs[i] = manifestLiveSST{
+			fileNo: binary.LittleEndian.Uint64(data[start : start+8]),
+			liveSSTStats: liveSSTStats{
+				totalEntries:   binary.LittleEndian.Uint64(data[start+8 : start+16]),
+				deletedEntries: binary.LittleEndian.Uint64(data[start+16 : start+24]),
+			},
+		}
 	}
 	state := manifestState{
 		checkpointWALFileNo: binary.LittleEndian.Uint64(data[manifestCheckpointWALNoOffset : manifestCheckpointWALNoOffset+8]),
@@ -218,7 +235,7 @@ func decodeManifestRecord(data []byte, offset int) (manifestRecord, int, bool) {
 		nextFileNo:          binary.LittleEndian.Uint64(data[manifestNextFileNoOffset : manifestNextFileNoOffset+8]),
 		walSegmentSize:      binary.LittleEndian.Uint64(data[manifestWALSegmentSizeOffset : manifestWALSegmentSizeOffset+8]),
 		primaryWALFlushed:   primaryWALFlushed == 1,
-		liveSSTFileNos:      liveSSTFileNos,
+		liveSSTs:            liveSSTs,
 	}
 	if err := validateManifestState(state); err != nil {
 		return manifestRecord{}, meta.size, false
@@ -234,7 +251,7 @@ func encodeManifestRecord(state manifestState, seq uint64) ([]byte, error) {
 	if err := validateManifestState(state); err != nil {
 		return nil, err
 	}
-	recordSize := manifestRecordHeaderSize + len(state.liveSSTFileNos)*8
+	recordSize := manifestRecordHeaderSize + len(state.liveSSTs)*manifestLiveSSTEntrySize
 	if recordSize > manifestSize {
 		return nil, ErrManifest
 	}
@@ -248,11 +265,13 @@ func encodeManifestRecord(state manifestState, seq uint64) ([]byte, error) {
 	if state.primaryWALFlushed {
 		binary.LittleEndian.PutUint32(data[manifestPrimaryWALFlushedOffset:manifestPrimaryWALFlushedOffset+4], 1)
 	}
-	binary.LittleEndian.PutUint32(data[manifestLiveSSTCountOffset:manifestLiveSSTCountOffset+4], uint32(len(state.liveSSTFileNos)))
+	binary.LittleEndian.PutUint32(data[manifestLiveSSTCountOffset:manifestLiveSSTCountOffset+4], uint32(len(state.liveSSTs)))
 	binary.LittleEndian.PutUint64(data[manifestSeqOffset:manifestSeqOffset+8], seq)
-	for i, fileNo := range state.liveSSTFileNos {
-		start := manifestLiveSSTOffset + i*8
-		binary.LittleEndian.PutUint64(data[start:start+8], fileNo)
+	for i, sst := range state.liveSSTs {
+		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
+		binary.LittleEndian.PutUint64(data[start:start+8], sst.fileNo)
+		binary.LittleEndian.PutUint64(data[start+8:start+16], sst.totalEntries)
+		binary.LittleEndian.PutUint64(data[start+16:start+24], sst.deletedEntries)
 	}
 	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], manifestRecordCRC(data))
 	return data, nil
@@ -320,11 +339,15 @@ func validateManifestState(state manifestState) error {
 	if state.walSegmentSize < walHeaderSize+walRecordHeaderSize || state.walSegmentSize > recordOffsetLimit {
 		return ErrManifest
 	}
-	for i, fileNo := range state.liveSSTFileNos {
+	for i, sst := range state.liveSSTs {
+		fileNo := sst.fileNo
 		if !validRecordFileNo(fileNo) || fileNo >= state.nextFileNo {
 			return ErrManifest
 		}
-		if i != 0 && state.liveSSTFileNos[i-1] >= fileNo {
+		if sst.deletedEntries > sst.totalEntries || sst.totalEntries > recordOffsetLimit {
+			return ErrManifest
+		}
+		if i != 0 && state.liveSSTs[i-1].fileNo >= fileNo {
 			return ErrManifest
 		}
 	}

@@ -26,6 +26,128 @@ func TestMinorCompactRetargetsCheckpointedWALToParquet(t *testing.T) {
 	assertIndexFileNoForKey(t, store, "bravo", onlyParquetFileNoForTest(t, store))
 }
 
+func TestManifestTracksLiveSSTDeletedEntries(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+	defer closeForTest(t, store)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	sstFileNo := onlyParquetFileNoForTest(t, store)
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.Delete([]byte("bravo"))
+	if err != nil || !deleted {
+		t.Fatalf("Delete(bravo) = (%v,%v), want true,nil", deleted, err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	state, ok, err := readManifest(store.manifest.path)
+	if err != nil || !ok {
+		t.Fatalf("readManifest = (%+v,%v,%v), want state,true,nil", state, ok, err)
+	}
+	for _, sst := range state.liveSSTs {
+		if sst.fileNo == sstFileNo {
+			if sst.totalEntries != 2 || sst.deletedEntries != 2 {
+				t.Fatalf("live SST stats = total %d deleted %d, want 2,2", sst.totalEntries, sst.deletedEntries)
+			}
+			return
+		}
+	}
+	t.Fatalf("live SST %d missing from manifest: %+v", sstFileNo, state.liveSSTs)
+}
+
+func TestManifestTracksLiveSSTDeletedEntriesAfterTailReplay(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	sstFileNo := onlyParquetFileNoForTest(t, store)
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.records.activeSegment().Sync(); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	state, ok, err := readManifest(reopened.manifest.path)
+	if err != nil || !ok {
+		t.Fatalf("readManifest = (%+v,%v,%v), want state,true,nil", state, ok, err)
+	}
+	for _, sst := range state.liveSSTs {
+		if sst.fileNo == sstFileNo {
+			if sst.totalEntries != 2 || sst.deletedEntries != 1 {
+				t.Fatalf("live SST stats after replay = total %d deleted %d, want 2,1", sst.totalEntries, sst.deletedEntries)
+			}
+			return
+		}
+	}
+	t.Fatalf("live SST %d missing from manifest after replay: %+v", sstFileNo, state.liveSSTs)
+}
+
+func TestInstallSSTProbeSkippedRowsCountAsDeleted(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+	defer closeForTest(t, store)
+
+	sstFileNo, entries := buildParquetFromWALForTest(t, store, firstWALSegmentNo)
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.publishInstalledSST(firstWALSegmentNo, sstFileNo, entries); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertManifestLiveSSTStatsForTest(t, store.manifest.path, sstFileNo, 2, 1)
+	assertGet(t, store, "alpha", "updated")
+	assertGet(t, store, "bravo", "two")
+}
+
+func TestInstallSSTReplaySkippedRowsCountAsDeleted(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	sstFileNo, _ := buildParquetFromWALForTest(t, store, firstWALSegmentNo)
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.records.AppendInstallSSTRecord(firstWALSegmentNo, sstFileNo); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
+	assertGet(t, reopened, "alpha", "updated")
+	assertGet(t, reopened, "bravo", "two")
+}
+
 func TestMinorCompactRetargetRefreshesDeletedWALBoundary(t *testing.T) {
 	data := newRecordBackendBenchData(768)
 	dir := t.TempDir()
@@ -1075,7 +1197,7 @@ func simulateCheckpointAfterPendingWALDeleteBeforeManifestForTest(t *testing.T, 
 		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
-		liveSSTFileNos:      store.records.liveSSTFileNosForManifest(),
+		liveSSTs:            store.records.liveSSTsForManifest(),
 	}
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+
+	"github.com/JimChengLin/minpatricia"
 )
 
 const crashTestWALSize int64 = 8 << 10
@@ -17,7 +19,17 @@ func TestStoreCrashRecoveryChaos(t *testing.T) {
 			33, 55, 4,
 			9, 4,
 			10, 5,
-		})
+		}, false)
+	})
+	t.Run("install_skip_windows", func(t *testing.T) {
+		runCrashRecoveryProgram(t, []byte{
+			0, 17, 4,
+			34, 51, 4,
+			22, 250,
+			55, 4,
+			9, 4,
+			251,
+		}, true)
 	})
 	for seed := int64(1); seed <= 3; seed++ {
 		t.Run(fmt.Sprintf("seed_%02d", seed), func(t *testing.T) {
@@ -26,7 +38,7 @@ func TestStoreCrashRecoveryChaos(t *testing.T) {
 			if _, err := rng.Read(program); err != nil {
 				t.Fatal(err)
 			}
-			runCrashRecoveryProgram(t, program)
+			runCrashRecoveryProgram(t, program, false)
 		})
 	}
 }
@@ -35,16 +47,17 @@ func FuzzStoreCrashRecovery(f *testing.F) {
 	f.Add([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8})
 	f.Add([]byte{9, 17, 25, 33, 41, 49, 57, 65})
 	f.Add([]byte{255, 254, 128, 127, 64, 63, 32, 31})
+	f.Add([]byte{0, 17, 4, 34, 51, 4, 250, 55, 4, 9, 4, 251})
 
 	f.Fuzz(func(t *testing.T, program []byte) {
 		if len(program) > 48 {
 			program = program[:48]
 		}
-		runCrashRecoveryProgram(t, program)
+		runCrashRecoveryProgram(t, program, true)
 	})
 }
 
-func runCrashRecoveryProgram(t *testing.T, program []byte) {
+func runCrashRecoveryProgram(t *testing.T, program []byte, allowInjectedWindows bool) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -58,6 +71,18 @@ func runCrashRecoveryProgram(t *testing.T, program []byte) {
 	expected := make(map[string]string)
 	for step, op := range program {
 		key := fmt.Sprintf("key-%02d", int(op>>4)%8)
+		if allowInjectedWindows {
+			switch op {
+			case 250:
+				store = crashInstallSSTSkipWindow(t, store, dir, expected, step)
+				assertLiveSSTStatsForStore(t, store)
+				continue
+			case 251:
+				store = crashInstallSSTBatchSkipWindow(t, store, dir, expected, step)
+				assertLiveSSTStatsForStore(t, store)
+				continue
+			}
+		}
 		switch op % 11 {
 		case 0, 1, 2:
 			value := fmt.Sprintf("value-%03d-%02x", step, op)
@@ -101,8 +126,89 @@ func runCrashRecoveryProgram(t *testing.T, program []byte) {
 				t.Fatalf("step %d major compact: %v", step, err)
 			}
 		}
+		assertLiveSSTStatsForStore(t, store)
 	}
 	assertCrashStoreContents(t, store, expected)
+	assertLiveSSTStatsForStore(t, store)
+}
+
+func crashInstallSSTSkipWindow(t *testing.T, store *Store, dir string, expected map[string]string, step int) *Store {
+	t.Helper()
+
+	sourceWALFileNo, ok := firstCompactableWALForCrashTest(store)
+	if !ok {
+		return store
+	}
+	sstFileNo, entries := buildParquetFromWALForTest(t, store, sourceWALFileNo)
+	if len(entries) == 0 {
+		if err := store.records.scheduleSSTDelete(sstFileNo); err != nil {
+			t.Fatalf("step %d schedule empty install-sst parquet delete: %v", step, err)
+		}
+		if err := store.records.deletePendingSSTs(); err != nil {
+			t.Fatalf("step %d delete empty install-sst parquet: %v", step, err)
+		}
+		return store
+	}
+	key := string(entries[0].key)
+	value := fmt.Sprintf("chaos-install-skip-%03d", step)
+	if err := store.Put([]byte(key), []byte(value)); err != nil {
+		t.Fatalf("step %d install-sst skip put %s: %v", step, key, err)
+	}
+	expected[key] = value
+	if _, err := store.records.AppendInstallSSTRecord(sourceWALFileNo, sstFileNo); err != nil {
+		t.Fatalf("step %d append install_sst: %v", step, err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+	return reopenCrashTestStore(t, dir, expected)
+}
+
+func crashInstallSSTBatchSkipWindow(t *testing.T, store *Store, dir string, expected map[string]string, step int) *Store {
+	t.Helper()
+
+	oldSSTFileNos, err := store.majorCompactionSSTFileNos()
+	if err != nil {
+		t.Fatalf("step %d major candidate: %v", step, err)
+	}
+	if len(oldSSTFileNos) == 0 {
+		return store
+	}
+	newSSTs, entries, err := store.buildMajorCompactionSSTs(oldSSTFileNos)
+	if err != nil {
+		t.Fatalf("step %d build major SSTs: %v", step, err)
+	}
+	if len(entries) == 0 {
+		_ = cleanupMajorCompactionSSTs(newSSTs)
+		return store
+	}
+	if err := store.records.installParquetSegments(newSSTs); err != nil {
+		_ = cleanupMajorCompactionSSTs(newSSTs)
+		t.Fatalf("step %d install built major SSTs: %v", step, err)
+	}
+	key := string(entries[0].key)
+	value := fmt.Sprintf("chaos-batch-skip-%03d", step)
+	if err := store.Put([]byte(key), []byte(value)); err != nil {
+		t.Fatalf("step %d install-sst-batch skip put %s: %v", step, key, err)
+	}
+	expected[key] = value
+	if _, err := store.records.AppendInstallSSTBatchRecord(oldSSTFileNos, parquetStoreFileNos(newSSTs)); err != nil {
+		t.Fatalf("step %d append install_sst_batch: %v", step, err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+	return reopenCrashTestStore(t, dir, expected)
+}
+
+func firstCompactableWALForCrashTest(store *Store) (uint64, bool) {
+	store.primaryMu.RLock()
+	defer store.primaryMu.RUnlock()
+
+	if store.records == nil {
+		return 0, false
+	}
+	fileNos := store.records.compactableWALFileNos(store.checkpointWALFileNo, 0)
+	if len(fileNos) == 0 {
+		return 0, false
+	}
+	return fileNos[0], true
 }
 
 func openCrashProgramStore(t *testing.T, dir string) *Store {
@@ -125,6 +231,7 @@ func reopenCrashTestStore(t *testing.T, dir string, expected map[string]string) 
 
 	store := openCrashProgramStore(t, dir)
 	assertCrashStoreContents(t, store, expected)
+	assertLiveSSTStatsForStore(t, store)
 	return store
 }
 
@@ -172,5 +279,46 @@ func assertCrashStoreContents(t *testing.T, store *Store, expected map[string]st
 	}
 	if len(seen) != len(expected) {
 		t.Fatalf("Scan saw %d items, want %d", len(seen), len(expected))
+	}
+}
+
+func assertLiveSSTStatsForStore(t *testing.T, store *Store) {
+	t.Helper()
+
+	if store == nil {
+		return
+	}
+	store.primaryMu.RLock()
+	backend := store.backend
+	records := store.records
+	if backend == nil || records == nil {
+		store.primaryMu.RUnlock()
+		return
+	}
+	liveByFileNo := make(map[uint64]uint64)
+	err := backend.index.Ascend(func(_ []byte, pos minpatricia.Position) bool {
+		liveByFileNo[recordPositionFileNo(pos)]++
+		return true
+	})
+	store.primaryMu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records.mu.RLock()
+	defer records.mu.RUnlock()
+	for fileNo, stats := range records.liveSSTs {
+		sst, ok := records.segments[fileNo].(*parquetRecordStore)
+		if !ok {
+			t.Fatalf("live SST %d segment is %T, want parquetRecordStore", fileNo, records.segments[fileNo])
+		}
+		totalEntries := uint64(sst.Len())
+		if stats.totalEntries != totalEntries {
+			t.Fatalf("live SST %d total_entries = %d, want parquet Len %d", fileNo, stats.totalEntries, totalEntries)
+		}
+		wantDeleted := totalEntries - liveByFileNo[fileNo]
+		if stats.deletedEntries != wantDeleted {
+			t.Fatalf("live SST %d deleted_entries = %d, want %d", fileNo, stats.deletedEntries, wantDeleted)
+		}
 	}
 }

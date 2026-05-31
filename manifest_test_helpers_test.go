@@ -3,6 +3,7 @@ package minweight_store
 import (
 	"errors"
 	"os"
+	"testing"
 )
 
 func readManifest(path string) (manifestState, bool, error) {
@@ -64,4 +65,31 @@ func replaceManifest(path string, state manifestState, seq uint64) error {
 		return err
 	}
 	return replaceManifestRecord(path, record)
+}
+
+func manifestLiveSSTStatsForTest(t *testing.T, path string) map[uint64]liveSSTStats {
+	t.Helper()
+
+	state, ok, err := readManifest(path)
+	if err != nil || !ok {
+		t.Fatalf("readManifest(%s) = (%+v,%v,%v), want state,true,nil", path, state, ok, err)
+	}
+	stats := make(map[uint64]liveSSTStats, len(state.liveSSTs))
+	for _, sst := range state.liveSSTs {
+		stats[sst.fileNo] = sst.liveSSTStats
+	}
+	return stats
+}
+
+func assertManifestLiveSSTStatsForTest(t *testing.T, path string, fileNo, totalEntries, deletedEntries uint64) {
+	t.Helper()
+
+	stats, ok := manifestLiveSSTStatsForTest(t, path)[fileNo]
+	if !ok {
+		t.Fatalf("manifest live SST %d missing", fileNo)
+	}
+	if stats.totalEntries != totalEntries || stats.deletedEntries != deletedEntries {
+		t.Fatalf("manifest live SST %d stats = total %d deleted %d, want %d,%d",
+			fileNo, stats.totalEntries, stats.deletedEntries, totalEntries, deletedEntries)
+	}
 }

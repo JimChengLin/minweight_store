@@ -37,8 +37,8 @@ func TestManifestFallsBackToPreviousValidRecord(t *testing.T) {
 func TestManifestCompactsWhenFull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manifestName)
 	large := testManifestState(1)
-	large.liveSSTFileNos = testManifestLiveSSTFileNos((manifestSize - 2*manifestRecordHeaderSize) / 8)
-	large.nextFileNo = large.liveSSTFileNos[len(large.liveSSTFileNos)-1] + 1
+	large.liveSSTs = testManifestLiveSSTs((manifestSize - 2*manifestRecordHeaderSize) / manifestLiveSSTEntrySize)
+	large.nextFileNo = large.liveSSTs[len(large.liveSSTs)-1].fileNo + 1
 	if err := writeManifest(path, large); err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +130,15 @@ func TestManifestAllowsNextFileNoToSkip(t *testing.T) {
 	}
 }
 
-func TestManifestRecordsLiveSSTFileNos(t *testing.T) {
+func TestManifestRecordsLiveSSTStats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manifestName)
 	state := testManifestState(1)
 	state.nextFileNo = 12
-	state.liveSSTFileNos = []uint64{4, 7, 9}
+	state.liveSSTs = []manifestLiveSST{
+		{fileNo: 4, liveSSTStats: liveSSTStats{totalEntries: 10, deletedEntries: 1}},
+		{fileNo: 7, liveSSTStats: liveSSTStats{totalEntries: 20, deletedEntries: 3}},
+		{fileNo: 9, liveSSTStats: liveSSTStats{totalEntries: 0, deletedEntries: 0}},
+	}
 
 	if err := writeManifest(path, state); err != nil {
 		t.Fatal(err)
@@ -151,14 +155,20 @@ func testManifestState(checkpoint uint64) manifestState {
 		activeWALFileNo:     checkpoint + 1,
 		nextFileNo:          checkpoint + 2,
 		walSegmentSize:      1 << 20,
-		liveSSTFileNos:      []uint64{},
+		liveSSTs:            []manifestLiveSST{},
 	}
 }
 
-func testManifestLiveSSTFileNos(count int) []uint64 {
-	fileNos := make([]uint64, count)
-	for i := range fileNos {
-		fileNos[i] = uint64(i + 3)
+func testManifestLiveSSTs(count int) []manifestLiveSST {
+	liveSSTs := make([]manifestLiveSST, count)
+	for i := range liveSSTs {
+		liveSSTs[i] = manifestLiveSST{
+			fileNo: uint64(i + 3),
+			liveSSTStats: liveSSTStats{
+				totalEntries:   uint64(i + 1),
+				deletedEntries: uint64(i / 2),
+			},
+		}
 	}
-	return fileNos
+	return liveSSTs
 }

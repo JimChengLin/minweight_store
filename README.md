@@ -69,9 +69,9 @@ switched during flush.
 
 `MANIFEST` stores `version`, `record_size`, `checkpoint_wal_file_no`,
 `active_wal_file_no`, `next_file_no`, `wal_segment_size`,
-`primary_wal_flushed`, live SST file numbers, `seq`, and a CRC. It is a 1MiB
-variable-size log; normal commits append and fsync the manifest file, and
-replacement is only used when the log is full.
+`primary_wal_flushed`, live SST file numbers with total/deleted entry counts,
+`seq`, and a CRC. It is a 1MiB variable-size log; normal commits append and
+fsync the manifest file, and replacement is only used when the log is full.
 On startup, a
 legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets
 `Open` use the primary runtime index directly: no secondary copy, no replay, and

@@ -46,7 +46,7 @@ type segmentedRecordStore struct {
 	// by replayed/successfully appended InstallSST records, and reduced by
 	// checkpointed SST deletes. It intentionally excludes pre-install parquet
 	// files that only exist because allocation/build reached disk.
-	liveSSTs          map[uint64]struct{}
+	liveSSTs          map[uint64]liveSSTStats
 	active            *mmapWALRecordStore
 	activeFileNo      uint64
 	nextFileNo        uint64
@@ -56,7 +56,7 @@ type segmentedRecordStore struct {
 	walDirDirty bool
 }
 
-func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo uint64, liveSSTFileNos []uint64) (*segmentedRecordStore, error) {
+func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo uint64, liveSSTs []manifestLiveSST) (*segmentedRecordStore, error) {
 	walDir := walSegmentsPath(dir)
 	ids, err := listWALSegmentIDs(walDir)
 	if err != nil {
@@ -86,14 +86,14 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 		rootDir:           dir,
 		size:              size,
 		segments:          make(map[uint64]recordSegment, len(ids)),
-		liveSSTs:          make(map[uint64]struct{}, len(liveSSTFileNos)),
+		liveSSTs:          make(map[uint64]liveSSTStats, len(liveSSTs)),
 		activeFileNo:      activeFileNo,
 		nextFileNo:        nextFileNo,
 		pendingDeleteWALs: make(map[uint64]struct{}),
 		pendingDeleteSSTs: make(map[uint64]struct{}),
 	}
-	for _, fileNo := range liveSSTFileNos {
-		store.liveSSTs[fileNo] = struct{}{}
+	for _, sst := range liveSSTs {
+		store.liveSSTs[sst.fileNo] = sst.liveSSTStats
 	}
 	storeOwnedByCaller := false
 	defer func() {
@@ -168,6 +168,21 @@ func (s *segmentedRecordStore) AppendInstallSSTBatchRecord(oldSSTFileNos, newSST
 }
 
 func (s *segmentedRecordStore) Free(pos minpatricia.Position) error {
+	fileNo := recordPositionFileNo(pos)
+	rowIndex := recordPositionOffset(pos)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats, ok := s.liveSSTs[fileNo]
+	if !ok {
+		return nil
+	}
+	if rowIndex >= stats.totalEntries || stats.deletedEntries >= stats.totalEntries {
+		return ErrManifest
+	}
+	stats.deletedEntries++
+	s.liveSSTs[fileNo] = stats
 	return nil
 }
 
@@ -401,10 +416,18 @@ func (s *segmentedRecordStore) markSSTLive(fileNo uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.segments[fileNo].(*parquetRecordStore); !ok {
+	sst, ok := s.segments[fileNo].(*parquetRecordStore)
+	if !ok {
 		return ErrManifest
 	}
-	s.liveSSTs[fileNo] = struct{}{}
+	totalEntries := uint64(sst.Len())
+	if stats, ok := s.liveSSTs[fileNo]; ok {
+		if stats.totalEntries != totalEntries {
+			return ErrManifest
+		}
+		return nil
+	}
+	s.liveSSTs[fileNo] = liveSSTStats{totalEntries: totalEntries}
 	return nil
 }
 
@@ -418,26 +441,37 @@ func (s *segmentedRecordStore) markSSTBatchLive(fileNos []uint64) error {
 		}
 	}
 	for _, fileNo := range fileNos {
-		s.liveSSTs[fileNo] = struct{}{}
+		sst := s.segments[fileNo].(*parquetRecordStore)
+		totalEntries := uint64(sst.Len())
+		if stats, ok := s.liveSSTs[fileNo]; ok {
+			if stats.totalEntries != totalEntries {
+				return ErrManifest
+			}
+			continue
+		}
+		s.liveSSTs[fileNo] = liveSSTStats{totalEntries: totalEntries}
 	}
 	return nil
 }
 
-func (s *segmentedRecordStore) liveSSTFileNosForManifest() []uint64 {
+func (s *segmentedRecordStore) liveSSTsForManifest() []manifestLiveSST {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	fileNos := make([]uint64, 0, len(s.liveSSTs))
-	for fileNo := range s.liveSSTs {
+	liveSSTs := make([]manifestLiveSST, 0, len(s.liveSSTs))
+	for fileNo, stats := range s.liveSSTs {
 		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
 			continue
 		}
-		fileNos = append(fileNos, fileNo)
+		liveSSTs = append(liveSSTs, manifestLiveSST{
+			fileNo:       fileNo,
+			liveSSTStats: stats,
+		})
 	}
-	sort.Slice(fileNos, func(i, j int) bool {
-		return fileNos[i] < fileNos[j]
+	sort.Slice(liveSSTs, func(i, j int) bool {
+		return liveSSTs[i].fileNo < liveSSTs[j].fileNo
 	})
-	return fileNos
+	return liveSSTs
 }
 
 func (s *segmentedRecordStore) scheduleWALDelete(fileNo uint64) error {
@@ -606,7 +640,7 @@ func (s *segmentedRecordStore) syncDirIfDirty() error {
 }
 
 func (s *segmentedRecordStore) openParquetSegments() error {
-	for id := range s.liveSSTs {
+	for id, stats := range s.liveSSTs {
 		if id >= atomic.LoadUint64(&s.nextFileNo) {
 			return ErrManifest
 		}
@@ -616,6 +650,10 @@ func (s *segmentedRecordStore) openParquetSegments() error {
 		store, err := openParquetRecordStore(parquetSegmentPath(s.rootDir, id), id)
 		if err != nil {
 			return err
+		}
+		if uint64(store.Len()) != stats.totalEntries {
+			_ = store.Close()
+			return ErrManifest
 		}
 		s.segments[id] = store
 	}

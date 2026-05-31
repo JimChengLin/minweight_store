@@ -386,6 +386,32 @@ func TestOpenPrimaryWALFlushedManifestAfterSecondaryReplayTrustsPrimary(t *testi
 	}
 }
 
+func TestOpenPrimaryWALFlushedManifestPreservesLiveSSTStats(t *testing.T) {
+	dir := t.TempDir()
+	store := openMinorCompactionStoreInDirForTest(t, dir)
+
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	sstFileNo := onlyParquetFileNoForTest(t, store)
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	simulatePrimaryWALFlushedCheckpointForTest(t, store)
+
+	reopened, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.stopMinorCompactionDispatcher()
+	defer closeForTest(t, reopened)
+
+	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
+	assertGet(t, reopened, "alpha", "updated")
+	assertGet(t, reopened, "bravo", "two")
+	assertGet(t, reopened, "charlie", "three")
+}
+
 func TestOpenPrimaryWALFlushedRejectsNonEmptyActiveWAL(t *testing.T) {
 	const walSize = int64(1 << 20)
 	dir := t.TempDir()
@@ -911,7 +937,7 @@ func simulatePrimaryWALFlushedCheckpointForTest(t *testing.T, store *Store) {
 		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
-		liveSSTFileNos:      store.records.liveSSTFileNosForManifest(),
+		liveSSTs:            store.records.liveSSTsForManifest(),
 	}
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)
@@ -941,7 +967,7 @@ func simulateCheckpointAfterSecondaryReplayBeforeManifestForTest(t *testing.T, s
 		nextFileNo:          store.records.nextFileNo,
 		walSegmentSize:      uint64(store.records.size),
 		primaryWALFlushed:   true,
-		liveSSTFileNos:      store.records.liveSSTFileNosForManifest(),
+		liveSSTs:            store.records.liveSSTsForManifest(),
 	}
 	if err := store.manifest.write(state); err != nil {
 		t.Fatal(err)

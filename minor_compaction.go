@@ -239,19 +239,19 @@ func (s *Store) publishInstalledSST(sourceWALFileNo, sstFileNo uint64, entries [
 
 func retargetInstalledSSTEntries(records *segmentedRecordStore, index *minpatricia.Index, sstFileNo uint64, entries []walCompactionCandidate) error {
 	for rowIndex, entry := range entries {
+		newPos, err := makeParquetRecordPosition(sstFileNo, uint64(rowIndex))
+		if err != nil {
+			return err
+		}
 		oldPos, ok, err := index.Probe(entry.key)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if !ok || oldPos != entry.pos {
+			if err := records.Free(newPos); err != nil {
+				return err
+			}
 			continue
-		}
-		if oldPos != entry.pos {
-			continue
-		}
-		newPos, err := makeParquetRecordPosition(sstFileNo, uint64(rowIndex))
-		if err != nil {
-			return err
 		}
 		if err := retargetIndexPosition(index, entry.key, oldPos, newPos); err != nil {
 			return err
@@ -268,6 +268,16 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 	if err != nil {
 		return err
 	}
+	if err := records.markSSTLive(sstFileNo); err != nil {
+		return err
+	}
+	countStats := liveIndex == nil
+	freeIfCountingStats := func(pos minpatricia.Position) error {
+		if !countStats {
+			return nil
+		}
+		return records.Free(pos)
+	}
 	if err := sst.scanKeys(func(rowIndex uint64, key []byte) error {
 		newPos, err := makeParquetRecordPosition(sstFileNo, rowIndex)
 		if err != nil {
@@ -283,20 +293,17 @@ func applyInstallSSTRecord(records *segmentedRecordStore, index, liveIndex *minp
 			}
 		}
 		oldPos, ok, err := index.Get(key)
-		if err != nil || !ok {
+		if err != nil {
 			return err
 		}
-		if recordPositionFileNo(oldPos) != sourceWALFileNo {
-			return nil
+		if !ok || recordPositionFileNo(oldPos) != sourceWALFileNo {
+			return freeIfCountingStats(newPos)
 		}
 		if err := retargetIndexPosition(index, key, oldPos, newPos); err != nil {
 			return err
 		}
-		return records.Free(oldPos)
+		return freeIfCountingStats(oldPos)
 	}); err != nil {
-		return err
-	}
-	if err := records.markSSTLive(sstFileNo); err != nil {
 		return err
 	}
 	return records.scheduleWALDelete(sourceWALFileNo)

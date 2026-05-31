@@ -83,7 +83,7 @@ func Open(dir string, options ...Options) (*Store, error) {
 				return nil, err
 			}
 		}
-		records, err := openSegmentedRecordStore(dir, cfg.WALSize, state.activeWALFileNo, state.nextFileNo, state.liveSSTFileNos)
+		records, err := openSegmentedRecordStore(dir, cfg.WALSize, state.activeWALFileNo, state.nextFileNo, state.liveSSTs)
 		if err != nil {
 			return nil, err
 		}
@@ -378,11 +378,17 @@ func replayWALIntoIndex(records *segmentedRecordStore, fileNo uint64, policy WAL
 					return nil
 				}
 			}
-			_, _, err := index.Put(key, pos)
-			return err
+			old, replaced, err := index.Put(key, pos)
+			if err != nil || liveIndex != nil || !replaced {
+				return err
+			}
+			return records.Free(old)
 		case walOpDelete:
-			_, _, err := index.Delete(key)
-			return err
+			old, deleted, err := index.Delete(key)
+			if err != nil || liveIndex != nil || !deleted {
+				return err
+			}
+			return records.Free(old)
 		case walOpInstallSST:
 			sourceWALFileNo, sstFileNo, err := decodeInstallSSTPayload(key)
 			if err != nil {

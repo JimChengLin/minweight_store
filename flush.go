@@ -54,7 +54,7 @@ func checkpointActiveWAL(dir string, backend *indexBackend, records *segmentedRe
 		nextFileNo:          atomic.LoadUint64(&records.nextFileNo),
 		walSegmentSize:      uint64(records.size),
 		primaryWALFlushed:   true,
-		liveSSTFileNos:      records.liveSSTFileNosForManifest(),
+		liveSSTs:            records.liveSSTsForManifest(),
 	}
 	activeSync := make(chan error, 1)
 	go func() {
