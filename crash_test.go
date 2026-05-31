@@ -165,7 +165,7 @@ func crashInstallSSTSkipWindow(t *testing.T, store *Store, dir string, expected 
 func crashInstallSSTBatchSkipWindow(t *testing.T, store *Store, dir string, expected map[string]string, step int) *Store {
 	t.Helper()
 
-	oldSSTFileNos, err := store.majorCompactionSSTFileNos()
+	oldSSTFileNos, _, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatalf("step %d major candidate: %v", step, err)
 	}

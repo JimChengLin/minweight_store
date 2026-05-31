@@ -470,6 +470,26 @@ func (s *segmentedRecordStore) sstGarbageRatioReached(stats liveSSTStats) bool {
 	return float64(stats.deletedEntries)/float64(stats.totalEntries) >= s.maxGarbageRatioPerSST
 }
 
+func (s *segmentedRecordStore) liveSSTGarbageRatioReached() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var stats liveSSTStats
+	hasLiveSST := false
+	for fileNo, liveStats := range s.liveSSTs {
+		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
+			continue
+		}
+		hasLiveSST = true
+		stats.totalEntries += liveStats.totalEntries
+		stats.deletedEntries += liveStats.deletedEntries
+	}
+	if !hasLiveSST {
+		return false
+	}
+	return s.sstGarbageRatioReached(stats)
+}
+
 func (s *segmentedRecordStore) markSSTLive(fileNo uint64) error {
 	return s.markSSTBatchLive([]uint64{fileNo})
 }

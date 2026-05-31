@@ -3,6 +3,8 @@
 package minweight_store
 
 import (
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -15,8 +17,8 @@ func TestMajorCompactPicksGarbageParquetSegments(t *testing.T) {
 	defer closeForTest(t, store)
 
 	oldSSTs := parquetFileNosForTest(store)
-	if len(oldSSTs) != 2 {
-		t.Fatalf("old parquet count = %d, want 2", len(oldSSTs))
+	if len(oldSSTs) != 3 {
+		t.Fatalf("old parquet count = %d, want 3", len(oldSSTs))
 	}
 	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
 		t.Fatal(err)
@@ -25,7 +27,10 @@ func TestMajorCompactPicksGarbageParquetSegments(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("Delete(charlie) = (%v,%v), want true,nil", deleted, err)
 	}
-	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	if err := store.Put([]byte("echo"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +46,8 @@ func TestMajorCompactPicksGarbageParquetSegments(t *testing.T) {
 	}
 
 	newSSTs := parquetFileNosForTest(store)
-	if len(newSSTs) != 2 {
-		t.Fatalf("new parquet count = %d, want 2", len(newSSTs))
+	if len(newSSTs) != 3 {
+		t.Fatalf("new parquet count = %d, want 3", len(newSSTs))
 	}
 	assertNoFileNoOverlapForTest(t, oldSSTs, newSSTs)
 	for _, fileNo := range oldSSTs {
@@ -69,6 +74,8 @@ func TestMajorCompactPicksGarbageParquetSegments(t *testing.T) {
 	assertGet(t, store, "bravo", "two")
 	assertMissing(t, store, "charlie")
 	assertGet(t, store, "delta", "four")
+	assertGet(t, store, "echo", "updated")
+	assertGet(t, store, "foxtrot", "six")
 }
 
 func TestMajorCompactSkipsBelowGarbageRatio(t *testing.T) {
@@ -85,7 +92,7 @@ func TestMajorCompactSkipsBelowGarbageRatio(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("Delete(charlie) = (%v,%v), want true,nil", deleted, err)
 	}
-	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +116,7 @@ func TestMajorCompactSkipsBelowGarbageRatio(t *testing.T) {
 	assertMissing(t, store, "charlie")
 }
 
-func TestMajorCompactCompactsSingleSSTThroughGenericPath(t *testing.T) {
+func TestMajorCompactFinalCheckCompactsSingleSSTWhenOverallGarbageHigh(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: crashTestWALSize})
 	if err != nil {
@@ -140,7 +147,11 @@ func TestMajorCompactCompactsSingleSSTThroughGenericPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	rawCompactableSSTs := store.records.compactableParquetFileNos()
+	if len(rawCompactableSSTs) != 1 || rawCompactableSSTs[0] != oldSST {
+		t.Fatalf("raw compactable parquet candidates = %v, want [%d]", rawCompactableSSTs, oldSST)
+	}
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,9 +165,12 @@ func TestMajorCompactCompactsSingleSSTThroughGenericPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newSST := onlyParquetFileNoForTest(t, store)
-	if newSST == oldSST {
-		t.Fatalf("major compaction kept old parquet %d", oldSST)
+	newSSTs := parquetFileNosForTest(store)
+	if len(newSSTs) != 1 {
+		t.Fatalf("parquet count after major compaction = %d, want 1", len(newSSTs))
+	}
+	if newSSTs[0] == oldSST {
+		t.Fatalf("single parquet %d was not compacted", oldSST)
 	}
 	if fileExistsForTest(t, parquetSegmentPath(dir, oldSST)) {
 		t.Fatalf("old parquet %d still exists after checkpoint", oldSST)
@@ -165,7 +179,189 @@ func TestMajorCompactCompactsSingleSSTThroughGenericPath(t *testing.T) {
 	assertGet(t, store, "bravo", "two")
 }
 
-func TestMajorCompactPicksEmptyParquetSegment(t *testing.T) {
+func TestMajorCompactFinalCheckCompactsTwoSSTsWhenOverallGarbageHigh(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	stopCompactionDispatchersForTest(store)
+
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	firstSource := store.checkpointWALFileNo
+	if compacted, err := store.minorCompactWAL(firstSource); err != nil || !compacted {
+		t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", firstSource, compacted, err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	secondSource := store.checkpointWALFileNo
+	if compacted, err := store.minorCompactWAL(secondSource); err != nil || !compacted {
+		t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", secondSource, compacted, err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	oldSSTs := parquetFileNosForTest(store)
+	if len(oldSSTs) != 2 {
+		t.Fatalf("old parquet count = %d, want 2", len(oldSSTs))
+	}
+
+	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.Delete([]byte("charlie"))
+	if err != nil || !deleted {
+		t.Fatalf("Delete(charlie) = (%v,%v), want true,nil", deleted, err)
+	}
+	if got := len(store.records.compactableParquetFileNos()); got != 2 {
+		t.Fatalf("raw compactable parquet count = %d, want 2", got)
+	}
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selectedSSTs) != len(oldSSTs) {
+		t.Fatalf("major compaction candidate count = %d, want %d", len(selectedSSTs), len(oldSSTs))
+	}
+	if err := store.MajorCompact(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSSTs := parquetFileNosForTest(store)
+	if len(gotSSTs) == 0 {
+		t.Fatalf("parquet count after major compaction = 0, want live SSTs")
+	}
+	assertNoFileNoOverlapForTest(t, oldSSTs, gotSSTs)
+	for _, fileNo := range oldSSTs {
+		if fileExistsForTest(t, parquetSegmentPath(dir, fileNo)) {
+			t.Fatalf("old parquet %d still exists after checkpoint", fileNo)
+		}
+	}
+	assertGet(t, store, "alpha", "updated")
+	assertGet(t, store, "bravo", "two")
+	assertMissing(t, store, "charlie")
+	assertGet(t, store, "delta", "four")
+}
+
+func TestMajorCompactSkipsSmallTailWhenOverallGarbageLow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	stopCompactionDispatchersForTest(store)
+
+	for i := 0; i < 5; i++ {
+		for j := 0; j < 2; j++ {
+			key := fmt.Sprintf("key-%d-%d", i, j)
+			if err := store.Put([]byte(key), []byte("value")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		sourceWAL := store.checkpointWALFileNo
+		compacted, err := store.minorCompactWAL(sourceWAL)
+		if err != nil || !compacted {
+			t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", sourceWAL, compacted, err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSSTs := parquetFileNosForTest(store)
+	if len(oldSSTs) != 5 {
+		t.Fatalf("old parquet count = %d, want 5", len(oldSSTs))
+	}
+	if err := store.Put([]byte("key-0-0"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+
+	rawCompactableSSTs := store.records.compactableParquetFileNos()
+	if len(rawCompactableSSTs) != 1 || rawCompactableSSTs[0] != oldSSTs[0] {
+		t.Fatalf("raw compactable parquet candidates = %v, want [%d]", rawCompactableSSTs, oldSSTs[0])
+	}
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selectedSSTs) != 0 {
+		t.Fatalf("major compaction candidates = %v, want none", selectedSSTs)
+	}
+	if err := store.MajorCompact(); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSSTs := parquetFileNosForTest(store)
+	if len(gotSSTs) != len(oldSSTs) {
+		t.Fatalf("parquet count after skipped major compaction = %d, want %d", len(gotSSTs), len(oldSSTs))
+	}
+	for i := range oldSSTs {
+		if gotSSTs[i] != oldSSTs[i] {
+			t.Fatalf("parquet fileNos after skipped major compaction = %v, want %v", gotSSTs, oldSSTs)
+		}
+	}
+	assertGet(t, store, "key-0-0", "updated")
+	assertGet(t, store, "key-4-1", "value")
+}
+
+func TestMajorCompactionGroupsUseOneWorkerPerThreeSSTs(t *testing.T) {
+	dir := t.TempDir()
+	if err := createRecordSegmentDirs(dir); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{
+		records:                  &segmentedRecordStore{rootDir: dir},
+		majorCompactionThreadNum: 8,
+	}
+	for fileNo := uint64(1); fileNo <= 6; fileNo++ {
+		if err := os.WriteFile(parquetSegmentPath(dir, fileNo), []byte{byte(fileNo)}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	groups, err := store.majorCompactionSSTGroups([]uint64{1, 2, 3, 4, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("group count for 5 SSTs = %d, want 1", len(groups))
+	}
+
+	groups, err = store.majorCompactionSSTGroups([]uint64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("group count for 6 SSTs = %d, want 2", len(groups))
+	}
+}
+
+func TestMajorCompactFinalCheckCompactsSingleEmptyParquetSegment(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{
 		WALSize:            crashTestWALSize,
@@ -203,7 +399,7 @@ func TestMajorCompactPicksEmptyParquetSegment(t *testing.T) {
 	if len(emptySSTs) != 1 {
 		t.Fatalf("empty parquet count = %d, want 1", len(emptySSTs))
 	}
-	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	selectedSSTs, _, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +413,8 @@ func TestMajorCompactPicksEmptyParquetSegment(t *testing.T) {
 	if err := store.flush(); err != nil {
 		t.Fatal(err)
 	}
-	if got := parquetFileNosForTest(store); len(got) != 0 {
+	got := parquetFileNosForTest(store)
+	if len(got) != 0 {
 		t.Fatalf("parquet fileNos after empty major compaction = %v, want none", got)
 	}
 	if fileExistsForTest(t, parquetSegmentPath(dir, emptySSTs[0])) {
@@ -238,34 +435,40 @@ func TestMajorCompactionDispatcherRunsOnCompactableSST(t *testing.T) {
 	defer closeForTest(t, store)
 	store.stopMinorCompactionDispatcher()
 
-	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
-		t.Fatal(err)
+	keys := []string{"alpha", "bravo", "charlie"}
+	for _, key := range keys {
+		if err := store.Put([]byte(key), []byte(key+"-value")); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
+		sourceWAL := store.checkpointWALFileNo
+		compacted, err := store.minorCompactWAL(sourceWAL)
+		if err != nil || !compacted {
+			t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", sourceWAL, compacted, err)
+		}
+		if err := store.flush(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
-		t.Fatal(err)
+	oldSSTs := parquetFileNosForTest(store)
+	if len(oldSSTs) != len(keys) {
+		t.Fatalf("old parquet count = %d, want %d", len(oldSSTs), len(keys))
 	}
-	if err := store.flush(); err != nil {
-		t.Fatal(err)
-	}
-	sourceWAL := store.checkpointWALFileNo
-	compacted, err := store.minorCompactWAL(sourceWAL)
-	if err != nil || !compacted {
-		t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", sourceWAL, compacted, err)
-	}
-	if err := store.flush(); err != nil {
-		t.Fatal(err)
-	}
-	oldSST := onlyParquetFileNoForTest(t, store)
 
-	if err := store.Put([]byte("alpha"), []byte("updated")); err != nil {
-		t.Fatal(err)
+	for _, key := range keys {
+		if err := store.Put([]byte(key), []byte(key+"-updated")); err != nil {
+			t.Fatal(err)
+		}
 	}
-	waitForIndexFileNoChangeForTest(t, store, "bravo", oldSST)
-	assertGet(t, store, "alpha", "updated")
-	assertGet(t, store, "bravo", "two")
+	waitForCompactableSSTCountForTest(t, store, 0)
+	assertGet(t, store, "alpha", "alpha-updated")
+	assertGet(t, store, "bravo", "bravo-updated")
+	assertGet(t, store, "charlie", "charlie-updated")
 }
 
-func TestMajorCompactLimitsInputSSTCount(t *testing.T) {
+func TestMajorCompactLimitsInputSSTCountPerRoundAndDrains(t *testing.T) {
 	dir := t.TempDir()
 	workers := 2
 	store, err := Open(dir, Options{
@@ -307,36 +510,38 @@ func TestMajorCompactLimitsInputSSTCount(t *testing.T) {
 	if len(allSSTs) != wantSelected+1 {
 		t.Fatalf("compactable parquet count = %d, want %d", len(allSSTs), wantSelected+1)
 	}
-	selectedSSTs, err := store.majorCompactionSSTFileNos()
+	selectedSSTs, hasMoreSSTs, err := store.majorCompactionSSTFileNos()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(selectedSSTs) != wantSelected {
 		t.Fatalf("major compaction candidate count = %d, want %d", len(selectedSSTs), wantSelected)
 	}
-	unselectedSST := allSSTs[wantSelected]
-
+	if !hasMoreSSTs {
+		t.Fatalf("major compaction candidate hasMore = false, want true")
+	}
 	if err := store.MajorCompact(); err != nil {
 		t.Fatal(err)
+	}
+	remainingSSTs := store.records.compactableParquetFileNos()
+	if len(remainingSSTs) != 0 {
+		t.Fatalf("compactable parquet after MajorCompact = %v, want none", remainingSSTs)
 	}
 	if err := store.flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, fileNo := range selectedSSTs {
+	for _, fileNo := range allSSTs {
 		if fileExistsForTest(t, parquetSegmentPath(dir, fileNo)) {
-			t.Fatalf("selected parquet %d still exists after checkpoint", fileNo)
+			t.Fatalf("old parquet %d still exists after checkpoint", fileNo)
 		}
-	}
-	if !fileExistsForTest(t, parquetSegmentPath(dir, unselectedSST)) {
-		t.Fatalf("unselected parquet %d was compacted", unselectedSST)
 	}
 	for _, key := range keys {
 		assertGet(t, store, key, key+"-updated")
 	}
 }
 
-func TestMajorCompactionDispatcherDrainsTruncatedCandidatesFromSingleSignal(t *testing.T) {
+func TestMajorCompactionDispatcherDrainsFullGroupsFromSingleSignal(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{
 		WALSize:                  crashTestWALSize,
@@ -381,7 +586,7 @@ func TestMajorCompactionDispatcherDrainsTruncatedCandidatesFromSingleSignal(t *t
 
 	store.startMajorCompactionDispatcher()
 	store.notifyMajorCompaction()
-	waitForNoCompactableSSTsForTest(t, store)
+	waitForCompactableSSTCountForTest(t, store, 0)
 	if err := store.flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -408,6 +613,9 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("Delete(charlie) = (%v,%v), want true,nil", deleted, err)
 	}
+	if err := store.Put([]byte("echo"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.MajorCompact(); err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +631,8 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 	defer closeForTest(t, reopened)
 
 	newSSTs := parquetFileNosForTest(reopened)
-	if len(newSSTs) != 2 {
-		t.Fatalf("reopened parquet count = %d, want 2", len(newSSTs))
+	if len(newSSTs) != 3 {
+		t.Fatalf("reopened parquet count = %d, want 3", len(newSSTs))
 	}
 	assertNoFileNoOverlapForTest(t, oldSSTs, newSSTs)
 	for _, fileNo := range oldSSTs {
@@ -451,6 +659,8 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 	assertGet(t, reopened, "bravo", "two")
 	assertMissing(t, reopened, "charlie")
 	assertGet(t, reopened, "delta", "four")
+	assertGet(t, reopened, "echo", "updated")
+	assertGet(t, reopened, "foxtrot", "six")
 }
 
 func TestInstallSSTBatchReplaySkippedRowsCountAsDeleted(t *testing.T) {
@@ -590,7 +800,24 @@ func TestMajorCompactMergeSortsSSTStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, key := range []string{"junk-a", "junk-b"} {
+	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("junk-c"), []byte("stale-c")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	thirdSource := store.checkpointWALFileNo
+	if compacted, err := store.minorCompactWAL(thirdSource); err != nil || !compacted {
+		t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", thirdSource, compacted, err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{"junk-a", "junk-b", "junk-c"} {
 		deleted, err := store.Delete([]byte(key))
 		if err != nil || !deleted {
 			t.Fatalf("Delete(%s) = (%v,%v), want true,nil", key, deleted, err)
@@ -611,7 +838,7 @@ func TestMajorCompactMergeSortsSSTStreams(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"alpha", "beta", "gamma", "zulu"}
+	want := []string{"alpha", "beta", "delta", "gamma", "zulu"}
 	if len(keys) != len(want) {
 		t.Fatalf("major compact keys = %v, want %v", keys, want)
 	}
@@ -652,8 +879,17 @@ func openMajorCompactionStoreForTest(t *testing.T, dir string) *Store {
 	if err := store.flush(); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Put([]byte("echo"), []byte("five")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("foxtrot"), []byte("six")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
 
-	for _, fileNo := range []uint64{firstWALSegmentNo, firstWALSegmentNo + 1} {
+	for _, fileNo := range []uint64{firstWALSegmentNo, firstWALSegmentNo + 1, firstWALSegmentNo + 2} {
 		compacted, err := store.minorCompactWAL(fileNo)
 		if err != nil || !compacted {
 			t.Fatalf("minorCompactWAL(%d) = (%v,%v), want true,nil", fileNo, compacted, err)
@@ -688,15 +924,15 @@ func majorCompactionEntryPosForTest(t *testing.T, entries []majorCompactionEntry
 	return 0
 }
 
-func waitForNoCompactableSSTsForTest(t *testing.T, store *Store) {
+func waitForCompactableSSTCountForTest(t *testing.T, store *Store, want int) {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(store.records.compactableParquetFileNos()) == 0 {
+		if len(store.records.compactableParquetFileNos()) == want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("major compaction did not drain compactable SSTs: %v", store.records.compactableParquetFileNos())
+	t.Fatalf("compactable SST count = %d, want %d: %v", len(store.records.compactableParquetFileNos()), want, store.records.compactableParquetFileNos())
 }

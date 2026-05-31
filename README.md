@@ -130,19 +130,24 @@ single signal can cover.
 
 `MajorCompact` rewrites live Parquet SST segments into new Parquet segments. It
 selects live SST file numbers whose manifest stats have
-`deleted_entries / total_entries >= MaxGarbageRatioPerSST` (default `0.2`), caps
-one round at `MajorCompactionThreadNum * 3` input SSTs, merge-sorts their keys,
-keeps only entries whose current primary index position still points at the old
-SST position, writes those entries into new SSTs near `TargetSSTSize`, then
-appends an `install_sst_batch` WAL record (`op=4`) with old and new SST file
-numbers. The publish step marks new SSTs live, retargets primary index entries,
-and schedules old SSTs for deletion. Old SST files are deleted only after
-checkpoint replay applies the batch record to the secondary index and before the
-final `primary_wal_flushed=false` manifest commit.
+`deleted_entries / total_entries >= MaxGarbageRatioPerSST` (default `0.2`) and
+drains the current eligible set in capped rounds. A round needs at least three
+eligible SSTs in the normal path; if the final tail has fewer than three
+eligible SSTs, it still runs when the overall live-SST garbage ratio reaches the
+same threshold.
+Each round uses at most `MajorCompactionThreadNum * 3` input SSTs and at most one
+worker per three input SSTs, merge-sorts their keys, keeps only entries whose
+current primary index position still points at the old SST position, writes
+those entries into new SSTs near `TargetSSTSize`, then appends an
+`install_sst_batch` WAL record (`op=4`) with old and new SST file numbers.
+The publish step marks new SSTs live, retargets primary index entries, and
+schedules old SSTs for deletion. Old SST files are deleted only after checkpoint
+replay applies the batch record to the secondary index and before the final
+`primary_wal_flushed=false` manifest commit.
 Disk stores also register a compactable-SST callback on the segmented record
 store. When an SST first reaches the garbage-ratio threshold (or becomes fully
 deleted/empty), the callback wakes a long-running major compaction dispatcher.
-The dispatcher runs one capped major compaction round at a time and repeats while
-more eligible SSTs remain, so one signal drains all currently eligible SSTs even
-when the first round is capped. A single eligible SST follows the same
-`install_sst_batch` path as larger groups; there is no special single-SST skip.
+Like the minor dispatcher, each wake calls the compaction method once; the method
+itself drains all currently eligible SSTs through capped rounds and only leaves a
+small final tail when the overall live-SST garbage ratio is still below the
+threshold.

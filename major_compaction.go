@@ -33,12 +33,21 @@ type majorCompactionBuildResult struct {
 const majorCompactionMaxSSTsPerWorker = 3
 
 func (s *Store) MajorCompact() error {
+	for {
+		compacted, hasMore, err := s.majorCompactOnce()
+		if err != nil || !compacted || !hasMore {
+			return err
+		}
+	}
+}
+
+func (s *Store) majorCompactOnce() (bool, bool, error) {
 	s.compactionMu.Lock()
 	defer s.compactionMu.Unlock()
 
-	oldSSTFileNos, err := s.majorCompactionSSTFileNos()
+	oldSSTFileNos, hasMore, err := s.majorCompactionSSTFileNos()
 	if err != nil || len(oldSSTFileNos) == 0 {
-		return err
+		return false, false, err
 	}
 
 	newSSTs, liveEntries, err := s.buildMajorCompactionSSTs(oldSSTFileNos)
@@ -49,35 +58,43 @@ func (s *Store) MajorCompact() error {
 		}
 	}()
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	if err := s.records.installParquetSegments(newSSTs); err != nil {
-		return err
+		return false, false, err
 	}
 	newSSTsOwnedByRecords = true
-	return s.publishInstalledSSTBatch(oldSSTFileNos, newSSTs, liveEntries)
+	if err := s.publishInstalledSSTBatch(oldSSTFileNos, newSSTs, liveEntries); err != nil {
+		return false, false, err
+	}
+	return true, hasMore, nil
 }
 
-func (s *Store) majorCompactionSSTFileNos() ([]uint64, error) {
+func (s *Store) majorCompactionSSTFileNos() ([]uint64, bool, error) {
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 
 	_, err := s.openBackend()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if s.records == nil && s.manifest == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 	if s.records == nil || s.manifest == nil {
-		return nil, ErrManifest
+		return nil, false, ErrManifest
 	}
 	fileNos := s.records.compactableParquetFileNos()
+	hasMore := false
 	limit := s.majorCompactionThreadNum * majorCompactionMaxSSTsPerWorker
 	if limit > 0 && len(fileNos) > limit {
 		fileNos = fileNos[:limit]
+		hasMore = true
 	}
-	return fileNos, nil
+	if !hasMore && len(fileNos) < majorCompactionMaxSSTsPerWorker && !s.records.liveSSTGarbageRatioReached() {
+		return nil, false, nil
+	}
+	return fileNos, hasMore, nil
 }
 
 type majorCompactionKeyStream struct {
@@ -285,7 +302,7 @@ func (s *Store) majorCompactionSSTGroups(fileNos []uint64) ([]majorCompactionSST
 		totalBytes += sizes[i]
 	}
 
-	groupCount := min(s.majorCompactionThreadNum, len(fileNos))
+	groupCount := min(s.majorCompactionThreadNum, len(fileNos)/majorCompactionMaxSSTsPerWorker)
 	if s.targetSSTSize > 0 {
 		groupCount = min(groupCount, max(1, int(totalBytes/s.targetSSTSize)))
 	}

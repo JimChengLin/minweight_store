@@ -32,8 +32,8 @@ type Store struct {
 	majorCompactionThreadNum int
 	maxImmutableWALNum       int
 	targetSSTSize            int64
-	minorCompaction          *minorCompactionDispatcher
-	majorCompaction          *majorCompactionDispatcher
+	minorCompaction          *compactionDispatcher
+	majorCompaction          *compactionDispatcher
 	fatal                    error
 }
 
