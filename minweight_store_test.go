@@ -181,16 +181,20 @@ func TestStoreFatalAfterRecordAcceptedIndexFailure(t *testing.T) {
 		backend: newIndexBackendWithNodes(records, newHeapNodeStore()),
 	}
 
-	err := store.Put([]byte("alpha"), []byte("one"))
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Put alpha err = %v", err)
+	}
+
+	err := store.Put([]byte("bravo"), []byte("two"))
 	assertFatalError(t, err)
 	if !errors.Is(err, minpatricia.ErrKeyTooLarge) {
 		t.Fatalf("Put err = %v, want %v", err, minpatricia.ErrKeyTooLarge)
 	}
-	if records.appends != 1 {
-		t.Fatalf("record appends = %d, want 1", records.appends)
+	if records.appends != 2 {
+		t.Fatalf("record appends = %d, want 2", records.appends)
 	}
 
-	if err := store.Put([]byte("bravo"), []byte("two")); !errors.Is(err, ErrFatal) {
+	if err := store.Put([]byte("charlie"), []byte("three")); !errors.Is(err, ErrFatal) {
 		t.Fatalf("Put after fatal err = %v, want %v", err, ErrFatal)
 	}
 	if _, _, err := store.Get([]byte("alpha")); !errors.Is(err, ErrFatal) {

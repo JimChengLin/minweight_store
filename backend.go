@@ -2,6 +2,7 @@ package minweight_store
 
 import (
 	"bytes"
+	"errors"
 
 	"github.com/JimChengLin/minpatricia"
 )
@@ -113,12 +114,8 @@ func (b *indexBackend) put(key, value []byte) (backendMutationResult, error) {
 	if err != nil {
 		return backendMutationNotAccepted, err
 	}
-	recordKey, ok := b.records.Key(pos)
-	if !ok {
-		return backendMutationAcceptedThenFailed, ErrCorruptIndex
-	}
 
-	old, replaced, err := b.index.Put(recordKey, pos)
+	old, replaced, err := b.index.Put(key, pos)
 	if err != nil {
 		_ = b.records.Free(pos)
 		return backendMutationAcceptedThenFailed, err
@@ -132,12 +129,10 @@ func (b *indexBackend) put(key, value []byte) (backendMutationResult, error) {
 }
 
 func retargetIndexPosition(index *minpatricia.Index, key []byte, oldPos, newPos minpatricia.Position) error {
-	replacedPos, replaced, err := index.Put(key, newPos)
-	if err != nil {
-		return err
-	}
-	if !replaced || replacedPos != oldPos {
+	if err := index.Retarget(key, oldPos, newPos); errors.Is(err, minpatricia.ErrPositionMismatch) {
 		return ErrCorruptIndex
+	} else if err != nil {
+		return err
 	}
 	return nil
 }
