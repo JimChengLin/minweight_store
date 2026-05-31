@@ -65,10 +65,7 @@ func (s *Store) minorCompact() error {
 		}(fileNo)
 	}
 	wg.Wait()
-	if firstErr != nil {
-		return firstErr
-	}
-	return nil
+	return firstErr
 }
 
 func (s *Store) minorCompactionCandidates() ([]uint64, error) {

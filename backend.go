@@ -129,12 +129,11 @@ func (b *indexBackend) put(key, value []byte) (backendMutationResult, error) {
 }
 
 func retargetIndexPosition(index *minpatricia.Index, key []byte, oldPos, newPos minpatricia.Position) error {
-	if err := index.Retarget(key, oldPos, newPos); errors.Is(err, minpatricia.ErrPositionMismatch) {
+	err := index.Retarget(key, oldPos, newPos)
+	if errors.Is(err, minpatricia.ErrPositionMismatch) {
 		return ErrCorruptIndex
-	} else if err != nil {
-		return err
 	}
-	return nil
+	return err
 }
 
 func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
