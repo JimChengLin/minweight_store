@@ -177,7 +177,7 @@ func (s *mmapWALRecordStore) Replay(policy WALReplayPolicy, fn func(op byte, key
 	case WALReplayPointInTime:
 		return s.replayPointInTime(fn)
 	case WALReplayBestEffort:
-		if _, err := s.repairBestEffort(); err != nil {
+		if err := s.repairBestEffort(); err != nil {
 			return err
 		}
 		return s.replayStrict(fn)
@@ -229,7 +229,7 @@ func (s *mmapWALRecordStore) replayPointInTime(fn func(op byte, key []byte, pos 
 	return nil
 }
 
-func (s *mmapWALRecordStore) repairBestEffort() (bool, error) {
+func (s *mmapWALRecordStore) repairBestEffort() error {
 	offset := uint64(walHeaderSize)
 	writeOffset := offset
 	repaired := false
@@ -255,15 +255,12 @@ func (s *mmapWALRecordStore) repairBestEffort() (bool, error) {
 		offset = rec.end
 	}
 	if !repaired {
-		return false, nil
+		return nil
 	}
 	if err := s.truncate(writeOffset); err != nil {
-		return false, err
+		return err
 	}
-	if err := s.Sync(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return s.Sync()
 }
 
 func (s *mmapWALRecordStore) nextValidRecord(start uint64) (uint64, bool) {

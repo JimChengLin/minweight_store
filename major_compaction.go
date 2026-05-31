@@ -34,20 +34,20 @@ const majorCompactionMaxSSTsPerWorker = 3
 
 func (s *Store) MajorCompact() error {
 	for {
-		compacted, hasMore, err := s.majorCompactOnce()
-		if err != nil || !compacted || !hasMore {
+		again, err := s.majorCompactOnce()
+		if err != nil || !again {
 			return err
 		}
 	}
 }
 
-func (s *Store) majorCompactOnce() (bool, bool, error) {
+func (s *Store) majorCompactOnce() (bool, error) {
 	s.compactionMu.Lock()
 	defer s.compactionMu.Unlock()
 
 	oldSSTFileNos, hasMore, err := s.majorCompactionSSTFileNos()
 	if err != nil || len(oldSSTFileNos) == 0 {
-		return false, false, err
+		return false, err
 	}
 
 	newSSTs, liveEntries, err := s.buildMajorCompactionSSTs(oldSSTFileNos)
@@ -58,16 +58,16 @@ func (s *Store) majorCompactOnce() (bool, bool, error) {
 		}
 	}()
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	if err := s.records.installParquetSegments(newSSTs); err != nil {
-		return false, false, err
+		return false, err
 	}
 	newSSTsOwnedByRecords = true
 	if err := s.publishInstalledSSTBatch(oldSSTFileNos, newSSTs, liveEntries); err != nil {
-		return false, false, err
+		return false, err
 	}
-	return true, hasMore, nil
+	return hasMore, nil
 }
 
 func (s *Store) majorCompactionSSTFileNos() ([]uint64, bool, error) {

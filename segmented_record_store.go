@@ -308,10 +308,10 @@ func (s *segmentedRecordStore) ReplayWAL(fileNo uint64, policy WALReplayPolicy, 
 	return wal.Replay(policy, fn)
 }
 
-func (s *segmentedRecordStore) repairWALBestEffort(fileNo uint64) (bool, error) {
+func (s *segmentedRecordStore) repairWALBestEffort(fileNo uint64) error {
 	wal := s.walSegment(fileNo)
 	if wal == nil {
-		return false, ErrCorruptWAL
+		return ErrCorruptWAL
 	}
 	return wal.repairBestEffort()
 }

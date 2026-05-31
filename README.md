@@ -151,3 +151,7 @@ Like the minor dispatcher, each wake calls the compaction method once; the metho
 itself drains all currently eligible SSTs through capped rounds and only leaves a
 small final tail when the overall live-SST garbage ratio is still below the
 threshold.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

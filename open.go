@@ -372,7 +372,7 @@ func prepareWALForReplay(records *segmentedRecordStore, fileNo uint64, policy WA
 	if policy != WALReplayBestEffort {
 		return policy, nil
 	}
-	if _, err := records.repairWALBestEffort(fileNo); err != nil {
+	if err := records.repairWALBestEffort(fileNo); err != nil {
 		return 0, err
 	}
 	return WALReplayStrict, nil
