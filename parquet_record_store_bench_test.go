@@ -97,6 +97,44 @@ func BenchmarkParquetRecordStoreSeekSequentialRead(b *testing.B) {
 	}
 }
 
+func BenchmarkIndexBackendScanParquet(b *testing.B) {
+	for _, size := range parquetRecordStoreBenchSizes {
+		data := newParquetRecordStoreBenchData(size.n)
+		store, positions := buildParquetRecordStoreForTest(b, filepath.Join(b.TempDir(), "records.parquet"), recordsFromParquetBenchData(data))
+		defer closeForTest(b, store)
+
+		records := parquetIndexRecordStore{parquetRecordStore: store}
+		backend := newIndexBackendWithNodes(records, newHeapNodeStore())
+		for i, key := range data.keys {
+			if _, _, err := backend.index.Put(key, positions[i]); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.Run(size.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(size.n * len(data.values[0])))
+			b.ResetTimer()
+
+			var sink int
+			for i := 0; i < b.N; i++ {
+				count := 0
+				if err := backend.scan(func(item Item) bool {
+					count++
+					sink += len(item.Key) + len(item.Value)
+					return true
+				}); err != nil {
+					b.Fatal(err)
+				}
+				if count != size.n {
+					b.Fatalf("scan count = %d, want %d", count, size.n)
+				}
+			}
+			_ = sink
+		})
+	}
+}
+
 func benchmarkParquetRecordStoreReads(b *testing.B, sizeName string, store *parquetRecordStore, positions []minpatricia.Position) {
 	b.Helper()
 
@@ -147,6 +185,26 @@ func benchmarkParquetRecordStoreReads(b *testing.B, sizeName string, store *parq
 		}
 		_ = sink
 	})
+}
+
+type parquetIndexRecordStore struct {
+	*parquetRecordStore
+}
+
+func (s parquetIndexRecordStore) Append(key, value []byte) (minpatricia.Position, error) {
+	return 0, ErrClosed
+}
+
+func (s parquetIndexRecordStore) Delete(key []byte) (minpatricia.Position, error) {
+	return 0, ErrClosed
+}
+
+func (s parquetIndexRecordStore) Free(pos minpatricia.Position) error {
+	return nil
+}
+
+func (s parquetIndexRecordStore) Sync() error {
+	return nil
 }
 
 func benchmarkParquetRecordStoreSeekSequentialRead[T any](b *testing.B, store *parquetRecordStore, recordSize func(T) int) {

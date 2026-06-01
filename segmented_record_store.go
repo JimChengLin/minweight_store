@@ -28,6 +28,7 @@ const (
 type recordSegment interface {
 	Key(pos minpatricia.Position) ([]byte, bool)
 	Value(pos minpatricia.Position) ([]byte, bool)
+	OwnedValue(pos minpatricia.Position) ([]byte, bool)
 	Close() error
 	closeAfterSync() error
 }
@@ -222,6 +223,14 @@ func (s *segmentedRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 		return nil, false
 	}
 	return segment.Value(pos)
+}
+
+func (s *segmentedRecordStore) OwnedValue(pos minpatricia.Position) ([]byte, bool) {
+	segment := s.segment(recordPositionFileNo(pos))
+	if segment == nil {
+		return nil, false
+	}
+	return segment.OwnedValue(pos)
 }
 
 func (s *segmentedRecordStore) Sync() error {

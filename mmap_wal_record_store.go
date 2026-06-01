@@ -166,6 +166,14 @@ func (s *mmapWALRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	return rec.value, true
 }
 
+func (s *mmapWALRecordStore) OwnedValue(pos minpatricia.Position) ([]byte, bool) {
+	value, ok := s.Value(pos)
+	if !ok {
+		return nil, false
+	}
+	return cloneBytes(value), true
+}
+
 func (s *mmapWALRecordStore) Len() int {
 	return 0
 }

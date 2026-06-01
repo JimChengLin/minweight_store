@@ -249,6 +249,11 @@ func (s *parquetRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
 	return value, true
 }
 
+func (s *parquetRecordStore) OwnedValue(pos minpatricia.Position) ([]byte, bool) {
+	// Value already clones bytes before releasing the parquet page.
+	return s.Value(pos)
+}
+
 func (s *parquetRecordStore) Len() int {
 	var rows int
 	for _, group := range s.rowGroups {

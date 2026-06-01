@@ -16,13 +16,15 @@ type indexBackend struct {
 
 // indexRecordStore is the record backend API that indexBackend needs above
 // minpatricia.RecordStore: appends allocate positions, deletes can append
-// tombstones, and reads resolve positions back to values.
+// tombstones, borrowed reads serve internal paths, and owned reads cross the
+// public API boundary.
 type indexRecordStore interface {
 	minpatricia.RecordStore
 	Append(key, value []byte) (minpatricia.Position, error)
 	Delete(key []byte) (minpatricia.Position, error)
 	Free(pos minpatricia.Position) error
 	Value(pos minpatricia.Position) ([]byte, bool)
+	OwnedValue(pos minpatricia.Position) ([]byte, bool)
 	Sync() error
 	Close() error
 	closeAfterSync() error
@@ -141,14 +143,14 @@ func (b *indexBackend) get(key []byte) ([]byte, bool, error) {
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	value, ok := b.records.Value(pos)
-	if !ok {
-		return nil, false, ErrCorruptIndex
-	}
 	if err := b.verifyReadPosition(key, pos); err != nil {
 		return nil, false, err
 	}
-	return cloneBytes(value), true, nil
+	value, ok := b.records.OwnedValue(pos)
+	if !ok {
+		return nil, false, ErrCorruptIndex
+	}
+	return value, true, nil
 }
 
 func (b *indexBackend) delete(key []byte) (bool, backendMutationResult, error) {
@@ -311,16 +313,16 @@ func (b *indexBackend) seekLE(key []byte) (Item, bool, error) {
 }
 
 func (b *indexBackend) item(key []byte, pos minpatricia.Position) (Item, error) {
-	value, ok := b.records.Value(pos)
-	if !ok {
-		return Item{}, ErrCorruptIndex
-	}
 	if err := b.verifyReadPosition(key, pos); err != nil {
 		return Item{}, err
 	}
+	value, ok := b.records.OwnedValue(pos)
+	if !ok {
+		return Item{}, ErrCorruptIndex
+	}
 	return Item{
 		Key:   cloneBytes(key),
-		Value: cloneBytes(value),
+		Value: value,
 	}, nil
 }
 

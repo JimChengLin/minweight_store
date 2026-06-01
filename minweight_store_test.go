@@ -90,22 +90,25 @@ func TestVerifyIndexOnReadOption(t *testing.T) {
 }
 
 func TestVerifyIndexOnReadDetectsPositionChange(t *testing.T) {
-	store := New()
+	records := newHeapRecordStore()
+	mutatingRecords := &mutatingKeyRecordStore{
+		indexRecordStore: records,
+	}
+	store := &Store{
+		backend: newIndexBackendWithNodes(mutatingRecords, newHeapNodeStore()),
+	}
 	store.backend.verifyIndexOnRead = true
 	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
-	newAlphaPos, err := store.backend.records.Append([]byte("alpha"), []byte("two"))
+	newAlphaPos, err := records.Append([]byte("alpha"), []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var mutateErr error
-	store.backend.records = &mutatingValueRecordStore{
-		indexRecordStore: store.backend.records,
-		mutate: func() {
-			_, _, mutateErr = store.backend.index.Put([]byte("alpha"), newAlphaPos)
-		},
+	mutatingRecords.mutate = func() {
+		_, _, mutateErr = store.backend.index.Put([]byte("alpha"), newAlphaPos)
 	}
 	_, ok, err := store.Get([]byte("alpha"))
 	if mutateErr != nil {
@@ -433,17 +436,17 @@ func (s *deleteCountingRecordStore) Delete(key []byte) (minpatricia.Position, er
 	return s.heapRecordStore.Delete(key)
 }
 
-type mutatingValueRecordStore struct {
+type mutatingKeyRecordStore struct {
 	indexRecordStore
 	mutate func()
 }
 
-func (s *mutatingValueRecordStore) Value(pos minpatricia.Position) ([]byte, bool) {
-	value, ok := s.indexRecordStore.Value(pos)
+func (s *mutatingKeyRecordStore) Key(pos minpatricia.Position) ([]byte, bool) {
+	key, ok := s.indexRecordStore.Key(pos)
 	if s.mutate != nil {
 		mutate := s.mutate
 		s.mutate = nil
 		mutate()
 	}
-	return value, ok
+	return key, ok
 }
