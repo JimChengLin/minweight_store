@@ -11,10 +11,10 @@ import (
 
 const (
 	manifestName                    = "MANIFEST"
-	manifestVersion          uint32 = 6
+	manifestVersion          uint32 = 7
 	manifestSize                    = 1 << 20
 	manifestRecordHeaderSize        = 64
-	manifestLiveSSTEntrySize        = 24
+	manifestLiveSSTEntrySize        = 16
 
 	manifestVersionOffset           = 0
 	manifestRecordSizeOffset        = 4
@@ -64,8 +64,8 @@ type liveSSTStats struct {
 }
 
 type manifestLiveSST struct {
-	fileNo uint64
-	liveSSTStats
+	fileNo         uint64
+	deletedEntries uint64
 }
 
 func openManifest(path string) (*manifest, manifestState, bool, error) {
@@ -222,11 +222,8 @@ func decodeManifestRecord(data []byte, offset int) (manifestRecord, int, bool) {
 	for i := range liveSSTs {
 		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
 		liveSSTs[i] = manifestLiveSST{
-			fileNo: binary.LittleEndian.Uint64(data[start : start+8]),
-			liveSSTStats: liveSSTStats{
-				totalEntries:   binary.LittleEndian.Uint64(data[start+8 : start+16]),
-				deletedEntries: binary.LittleEndian.Uint64(data[start+16 : start+24]),
-			},
+			fileNo:         binary.LittleEndian.Uint64(data[start : start+8]),
+			deletedEntries: binary.LittleEndian.Uint64(data[start+8 : start+16]),
 		}
 	}
 	state := manifestState{
@@ -270,8 +267,7 @@ func encodeManifestRecord(state manifestState, seq uint64) ([]byte, error) {
 	for i, sst := range state.liveSSTs {
 		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
 		binary.LittleEndian.PutUint64(data[start:start+8], sst.fileNo)
-		binary.LittleEndian.PutUint64(data[start+8:start+16], sst.totalEntries)
-		binary.LittleEndian.PutUint64(data[start+16:start+24], sst.deletedEntries)
+		binary.LittleEndian.PutUint64(data[start+8:start+16], sst.deletedEntries)
 	}
 	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], manifestRecordCRC(data))
 	return data, nil
@@ -344,7 +340,7 @@ func validateManifestState(state manifestState) error {
 		if !validRecordFileNo(fileNo) || fileNo >= state.nextFileNo {
 			return ErrManifest
 		}
-		if sst.deletedEntries > sst.totalEntries || sst.totalEntries > recordOffsetLimit {
+		if sst.deletedEntries > recordOffsetLimit {
 			return ErrManifest
 		}
 		if i != 0 && state.liveSSTs[i-1].fileNo >= fileNo {

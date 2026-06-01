@@ -406,7 +406,7 @@ func TestOpenPrimaryWALFlushedManifestPreservesLiveSSTStats(t *testing.T) {
 	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
-	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
+	assertManifestLiveSSTDeletedEntriesForTest(t, reopened.manifest.path, sstFileNo, 1)
 	assertGet(t, reopened, "alpha", "updated")
 	assertGet(t, reopened, "bravo", "two")
 	assertGet(t, reopened, "charlie", "three")

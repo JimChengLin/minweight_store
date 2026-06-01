@@ -98,9 +98,8 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 		pendingDeleteSSTs:     make(map[uint64]struct{}),
 	}
 	for _, sst := range liveSSTs {
-		store.liveSSTs[sst.fileNo] = sst.liveSSTStats
+		store.liveSSTs[sst.fileNo] = liveSSTStats{deletedEntries: sst.deletedEntries}
 	}
-	store.rebuildCompactableSSTs()
 	storeOwnedByCaller := false
 	defer func() {
 		if !storeOwnedByCaller {
@@ -130,6 +129,7 @@ func openSegmentedRecordStore(dir string, size int64, activeFileNo, nextFileNo u
 	if err := store.openParquetSegments(); err != nil {
 		return nil, err
 	}
+	store.rebuildCompactableSSTs()
 	storeOwnedByCaller = true
 	return store, nil
 }
@@ -548,8 +548,8 @@ func (s *segmentedRecordStore) liveSSTsForManifest() []manifestLiveSST {
 			continue
 		}
 		liveSSTs = append(liveSSTs, manifestLiveSST{
-			fileNo:       fileNo,
-			liveSSTStats: stats,
+			fileNo:         fileNo,
+			deletedEntries: stats.deletedEntries,
 		})
 	}
 	sort.Slice(liveSSTs, func(i, j int) bool {
@@ -737,10 +737,12 @@ func (s *segmentedRecordStore) openParquetSegments() error {
 		if err != nil {
 			return err
 		}
-		if uint64(store.Len()) != stats.totalEntries {
+		stats.totalEntries = uint64(store.Len())
+		if stats.deletedEntries > stats.totalEntries {
 			_ = store.Close()
 			return ErrManifest
 		}
+		s.liveSSTs[id] = stats
 		s.segments[id] = store
 	}
 	return nil

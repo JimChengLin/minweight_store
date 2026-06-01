@@ -130,14 +130,14 @@ func TestManifestAllowsNextFileNoToSkip(t *testing.T) {
 	}
 }
 
-func TestManifestRecordsLiveSSTStats(t *testing.T) {
+func TestManifestRecordsLiveSSTDeletedEntries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), manifestName)
 	state := testManifestState(1)
 	state.nextFileNo = 12
 	state.liveSSTs = []manifestLiveSST{
-		{fileNo: 4, liveSSTStats: liveSSTStats{totalEntries: 10, deletedEntries: 1}},
-		{fileNo: 7, liveSSTStats: liveSSTStats{totalEntries: 20, deletedEntries: 3}},
-		{fileNo: 9, liveSSTStats: liveSSTStats{totalEntries: 0, deletedEntries: 0}},
+		{fileNo: 4, deletedEntries: 1},
+		{fileNo: 7, deletedEntries: 3},
+		{fileNo: 9, deletedEntries: 0},
 	}
 
 	if err := writeManifest(path, state); err != nil {
@@ -163,11 +163,8 @@ func testManifestLiveSSTs(count int) []manifestLiveSST {
 	liveSSTs := make([]manifestLiveSST, count)
 	for i := range liveSSTs {
 		liveSSTs[i] = manifestLiveSST{
-			fileNo: uint64(i + 3),
-			liveSSTStats: liveSSTStats{
-				totalEntries:   uint64(i + 1),
-				deletedEntries: uint64(i / 2),
-			},
+			fileNo:         uint64(i + 3),
+			deletedEntries: uint64(i / 2),
 		}
 	}
 	return liveSSTs

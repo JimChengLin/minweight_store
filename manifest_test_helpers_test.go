@@ -67,29 +67,28 @@ func replaceManifest(path string, state manifestState, seq uint64) error {
 	return replaceManifestRecord(path, record)
 }
 
-func manifestLiveSSTStatsForTest(t *testing.T, path string) map[uint64]liveSSTStats {
+func manifestLiveSSTDeletedEntriesForTest(t *testing.T, path string) map[uint64]uint64 {
 	t.Helper()
 
 	state, ok, err := readManifest(path)
 	if err != nil || !ok {
 		t.Fatalf("readManifest(%s) = (%+v,%v,%v), want state,true,nil", path, state, ok, err)
 	}
-	stats := make(map[uint64]liveSSTStats, len(state.liveSSTs))
+	deletedEntries := make(map[uint64]uint64, len(state.liveSSTs))
 	for _, sst := range state.liveSSTs {
-		stats[sst.fileNo] = sst.liveSSTStats
+		deletedEntries[sst.fileNo] = sst.deletedEntries
 	}
-	return stats
+	return deletedEntries
 }
 
-func assertManifestLiveSSTStatsForTest(t *testing.T, path string, fileNo, totalEntries, deletedEntries uint64) {
+func assertManifestLiveSSTDeletedEntriesForTest(t *testing.T, path string, fileNo, want uint64) {
 	t.Helper()
 
-	stats, ok := manifestLiveSSTStatsForTest(t, path)[fileNo]
+	got, ok := manifestLiveSSTDeletedEntriesForTest(t, path)[fileNo]
 	if !ok {
 		t.Fatalf("manifest live SST %d missing", fileNo)
 	}
-	if stats.totalEntries != totalEntries || stats.deletedEntries != deletedEntries {
-		t.Fatalf("manifest live SST %d stats = total %d deleted %d, want %d,%d",
-			fileNo, stats.totalEntries, stats.deletedEntries, totalEntries, deletedEntries)
+	if got != want {
+		t.Fatalf("manifest live SST %d deleted entries = %d, want %d", fileNo, got, want)
 	}
 }

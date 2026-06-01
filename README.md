@@ -157,9 +157,10 @@ switched during flush.
 
 `MANIFEST` stores `version`, `record_size`, `checkpoint_wal_file_no`,
 `active_wal_file_no`, `next_file_no`, `wal_segment_size`,
-`primary_wal_flushed`, live SST file numbers with total/deleted entry counts,
-`seq`, and a CRC. It is a 1MiB variable-size log; normal commits append and
-fsync the manifest file, and replacement is only used when the log is full.
+`primary_wal_flushed`, live SST file numbers with deleted-entry counts, `seq`,
+and a CRC. SST total row counts are rebuilt from Parquet metadata when live SSTs
+are opened. It is a 1MiB variable-size log; normal commits append and fsync the
+manifest file, and replacement is only used when the log is full.
 On startup, a
 legal manifest with `primary_wal_flushed=false` and an empty WAL tail lets
 `Open` use the primary runtime index directly: no secondary copy, no replay, and
@@ -225,9 +226,11 @@ startup and after flush. Each wake processes the full current eligible WAL list;
 single signal can cover.
 
 `MajorCompact` rewrites live Parquet SST segments into new Parquet segments. It
-selects live SST file numbers whose manifest stats have
+selects live SST file numbers whose runtime stats have
 `deleted_entries / total_entries >= MaxGarbageRatioPerSST` (default `0.2`) and
-drains the current eligible set in capped rounds. A round needs at least three
+drains the current eligible set in capped rounds. `deleted_entries` comes from
+the manifest, while `total_entries` is rebuilt from Parquet metadata. A round
+needs at least three
 eligible SSTs in the normal path; if the final tail has fewer than three
 eligible SSTs, it still runs when the overall live-SST garbage ratio reaches the
 same threshold.

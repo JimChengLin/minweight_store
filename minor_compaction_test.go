@@ -53,8 +53,8 @@ func TestManifestTracksLiveSSTDeletedEntries(t *testing.T) {
 	}
 	for _, sst := range state.liveSSTs {
 		if sst.fileNo == sstFileNo {
-			if sst.totalEntries != 2 || sst.deletedEntries != 2 {
-				t.Fatalf("live SST stats = total %d deleted %d, want 2,2", sst.totalEntries, sst.deletedEntries)
+			if sst.deletedEntries != 2 {
+				t.Fatalf("live SST deleted entries = %d, want 2", sst.deletedEntries)
 			}
 			return
 		}
@@ -97,8 +97,8 @@ func TestManifestTracksLiveSSTDeletedEntriesAfterTailReplay(t *testing.T) {
 	}
 	for _, sst := range state.liveSSTs {
 		if sst.fileNo == sstFileNo {
-			if sst.totalEntries != 2 || sst.deletedEntries != 1 {
-				t.Fatalf("live SST stats after replay = total %d deleted %d, want 2,1", sst.totalEntries, sst.deletedEntries)
+			if sst.deletedEntries != 1 {
+				t.Fatalf("live SST deleted entries after replay = %d, want 1", sst.deletedEntries)
 			}
 			return
 		}
@@ -122,7 +122,7 @@ func TestInstallSSTProbeSkippedRowsCountAsDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertManifestLiveSSTStatsForTest(t, store.manifest.path, sstFileNo, 2, 1)
+	assertManifestLiveSSTDeletedEntriesForTest(t, store.manifest.path, sstFileNo, 1)
 	assertGet(t, store, "alpha", "updated")
 	assertGet(t, store, "bravo", "two")
 }
@@ -150,7 +150,7 @@ func TestInstallSSTReplaySkippedRowsCountAsDeleted(t *testing.T) {
 	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
-	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, sstFileNo, 2, 1)
+	assertManifestLiveSSTDeletedEntriesForTest(t, reopened.manifest.path, sstFileNo, 1)
 	assertGet(t, reopened, "alpha", "updated")
 	assertGet(t, reopened, "bravo", "two")
 }

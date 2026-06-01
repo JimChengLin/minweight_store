@@ -55,19 +55,19 @@ func TestMajorCompactPicksGarbageParquetSegments(t *testing.T) {
 			t.Fatalf("old parquet %d still exists after checkpoint", fileNo)
 		}
 	}
-	liveStats := manifestLiveSSTStatsForTest(t, store.manifest.path)
+	deletedEntries := manifestLiveSSTDeletedEntriesForTest(t, store.manifest.path)
 	for _, fileNo := range oldSSTs {
-		if _, ok := liveStats[fileNo]; ok {
+		if _, ok := deletedEntries[fileNo]; ok {
 			t.Fatalf("old parquet %d still live in manifest after checkpoint", fileNo)
 		}
 	}
 	for _, fileNo := range newSSTs {
-		stats, ok := liveStats[fileNo]
+		deleted, ok := deletedEntries[fileNo]
 		if !ok {
 			t.Fatalf("new parquet %d missing from manifest", fileNo)
 		}
-		if stats.totalEntries != 1 || stats.deletedEntries != 0 {
-			t.Fatalf("new parquet %d stats = total %d deleted %d, want 1,0", fileNo, stats.totalEntries, stats.deletedEntries)
+		if deleted != 0 {
+			t.Fatalf("new parquet %d deleted entries = %d, want 0", fileNo, deleted)
 		}
 	}
 	assertGet(t, store, "alpha", "updated")
@@ -640,19 +640,19 @@ func TestMajorCompactInstallSSTBatchReplaysAfterDirtyRestart(t *testing.T) {
 			t.Fatalf("old parquet %d still exists after recovery", fileNo)
 		}
 	}
-	liveStats := manifestLiveSSTStatsForTest(t, reopened.manifest.path)
+	deletedEntries := manifestLiveSSTDeletedEntriesForTest(t, reopened.manifest.path)
 	for _, fileNo := range oldSSTs {
-		if _, ok := liveStats[fileNo]; ok {
+		if _, ok := deletedEntries[fileNo]; ok {
 			t.Fatalf("old parquet %d still live in manifest after recovery", fileNo)
 		}
 	}
 	for _, fileNo := range newSSTs {
-		stats, ok := liveStats[fileNo]
+		deleted, ok := deletedEntries[fileNo]
 		if !ok {
 			t.Fatalf("new parquet %d missing from manifest after recovery", fileNo)
 		}
-		if stats.totalEntries != 1 || stats.deletedEntries != 0 {
-			t.Fatalf("new parquet %d stats after recovery = total %d deleted %d, want 1,0", fileNo, stats.totalEntries, stats.deletedEntries)
+		if deleted != 0 {
+			t.Fatalf("new parquet %d deleted entries after recovery = %d, want 0", fileNo, deleted)
 		}
 	}
 	assertGet(t, reopened, "alpha", "updated")
@@ -694,7 +694,7 @@ func TestInstallSSTBatchReplaySkippedRowsCountAsDeleted(t *testing.T) {
 	stopCompactionDispatchersForTest(reopened)
 	defer closeForTest(t, reopened)
 
-	assertManifestLiveSSTStatsForTest(t, reopened.manifest.path, alphaNewSSTFileNo, 1, 1)
+	assertManifestLiveSSTDeletedEntriesForTest(t, reopened.manifest.path, alphaNewSSTFileNo, 1)
 	assertGet(t, reopened, "alpha", "updated")
 	assertGet(t, reopened, "bravo", "two")
 	assertGet(t, reopened, "charlie", "three")
