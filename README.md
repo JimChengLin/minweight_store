@@ -3,6 +3,8 @@
 `minweight_store` is a small single-node ordered KV store. The current storage
 behavior is summarized below.
 
+![minweight_store architecture](docs/assets/architecture/minweight_store_shadow_index_architecture.svg)
+
 `New` creates an in-memory ordered KV store backed by
 [`minpatricia`](https://github.com/JimChengLin/minpatricia). `Open` creates the
 disk-backed implementation described below.

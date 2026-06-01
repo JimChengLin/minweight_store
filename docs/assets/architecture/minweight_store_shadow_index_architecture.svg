@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1350" viewBox="0 0 2400 1350" role="img" aria-labelledby="title desc">
+  <title id="title">minweight_store architecture in English</title>
+  <desc id="desc">English architecture diagram for minweight_store: Shadow Index atomic checkpoint, minpatricia A/B indexes, shared segmentedRecordStore, WAL KVRecord, ParquetSST KVRecord, and minor compaction from WAL to ParquetSST.</desc>
+  <defs>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+    <marker id="arrowSlate" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.11"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 800 58px Inter, "SF Pro Display", Arial, sans-serif; fill: #0f172a; letter-spacing: 0; }
+      .subtitle { font: 400 26px Inter, "SF Pro Text", Arial, sans-serif; fill: #475569; letter-spacing: 0; }
+      .h2 { font: 800 32px Inter, "SF Pro Display", Arial, sans-serif; fill: #0f172a; letter-spacing: 0; }
+      .h2Light { font: 800 32px Inter, "SF Pro Display", Arial, sans-serif; fill: #f8fafc; letter-spacing: 0; }
+      .h3 { font: 800 25px Inter, "SF Pro Display", Arial, sans-serif; fill: #0f172a; letter-spacing: 0; }
+      .h3Light { font: 800 25px Inter, "SF Pro Display", Arial, sans-serif; fill: #f8fafc; letter-spacing: 0; }
+      .body { font: 400 21px Inter, "SF Pro Text", Arial, sans-serif; fill: #334155; letter-spacing: 0; }
+      .small { font: 400 18px Inter, "SF Pro Text", Arial, sans-serif; fill: #475569; letter-spacing: 0; }
+      .smallLight { font: 400 18px Inter, "SF Pro Text", Arial, sans-serif; fill: #dbeafe; letter-spacing: 0; }
+      .smallTeal { font: 400 18px Inter, "SF Pro Text", Arial, sans-serif; fill: #ccfbf1; letter-spacing: 0; }
+      .mono { font: 700 19px "SFMono-Regular", Menlo, Consolas, monospace; fill: #1e293b; letter-spacing: 0; }
+      .monoLight { font: 700 19px "SFMono-Regular", Menlo, Consolas, monospace; fill: #e0f2fe; letter-spacing: 0; }
+      .chip { font: 800 18px Inter, "SF Pro Text", Arial, sans-serif; fill: #0f172a; letter-spacing: 0; }
+      .card { fill: #ffffff; stroke: #d6e0ea; stroke-width: 2; rx: 24; filter: url(#shadow); }
+      .blueCard { fill: #eff6ff; stroke: #60a5fa; stroke-width: 3; rx: 24; filter: url(#shadow); }
+      .tealCard { fill: #ecfdf5; stroke: #2dd4bf; stroke-width: 3; rx: 24; filter: url(#shadow); }
+      .darkCard { fill: #111827; stroke: #334155; stroke-width: 2; rx: 28; filter: url(#shadow); }
+      .pillBlue { fill: #dbeafe; stroke: #93c5fd; stroke-width: 1.5; rx: 22; }
+      .pillTeal { fill: #ccfbf1; stroke: #5eead4; stroke-width: 1.5; rx: 22; }
+      .pillAmber { fill: #fef3c7; stroke: #fbbf24; stroke-width: 1.5; rx: 22; }
+      .pillSlate { fill: #e2e8f0; stroke: #cbd5e1; stroke-width: 1.5; rx: 22; }
+      .lineBlue { fill: none; stroke: #2563eb; stroke-width: 4; marker-end: url(#arrowBlue); }
+      .lineTeal { fill: none; stroke: #0f766e; stroke-width: 4; marker-end: url(#arrowTeal); }
+      .lineAmber { fill: none; stroke: #b45309; stroke-width: 4; marker-end: url(#arrowAmber); }
+      .lineSlate { fill: none; stroke: #64748b; stroke-width: 3.5; marker-end: url(#arrowSlate); }
+      .dash { stroke-dasharray: 10 10; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="2400" height="1350"/>
+
+  <text class="title" x="100" y="92">minweight_store: Shadow Index + Shared KVRecord</text>
+  <text class="subtitle" x="104" y="136">A/B indexes define the atomic checkpoint boundary; WAL and ParquetSST both serve reads as RecordStore backends.</text>
+
+  <rect class="pillBlue" x="104" y="174" width="598" height="58"/>
+  <text class="chip" x="136" y="211">Shadow Index: A / B as recovery boundaries</text>
+  <rect class="pillTeal" x="760" y="174" width="560" height="58"/>
+  <text class="chip" x="792" y="211">minpatricia: compact ordered index</text>
+  <rect class="pillAmber" x="1378" y="174" width="918" height="58"/>
+  <text class="chip" x="1410" y="211">WAL handles hot writes; minor compaction converts it to directly readable ParquetSST</text>
+
+  <!-- API -->
+  <rect class="card" x="104" y="298" width="344" height="430"/>
+  <text class="h2" x="138" y="352">API</text>
+  <text class="body" x="138" y="398">Put / Delete</text>
+  <text class="small" x="138" y="428">append WAL, update A</text>
+  <line x1="138" y1="462" x2="414" y2="462" stroke="#cbd5e1" stroke-width="2"/>
+  <text class="body" x="138" y="508">Get / Scan / Seek</text>
+  <text class="small" x="138" y="538">probe A only</text>
+  <text class="small" x="138" y="566">then resolve position</text>
+  <line x1="138" y1="600" x2="414" y2="600" stroke="#cbd5e1" stroke-width="2"/>
+  <text class="body" x="138" y="646">Ordered KV</text>
+  <text class="small" x="138" y="676">scan / reverse / seek</text>
+
+  <!-- A index -->
+  <rect class="blueCard" x="560" y="298" width="610" height="430"/>
+  <rect x="560" y="298" width="610" height="76" rx="24" fill="#1d4ed8"/>
+  <text class="h2Light" x="600" y="348">A Index: Primary / Live</text>
+  <text class="body" x="602" y="418">single live read/write index</text>
+  <rect class="pillBlue" x="602" y="452" width="526" height="84"/>
+  <text class="h3" x="632" y="489">minpatricia.Index</text>
+  <text class="small" x="632" y="516">compact nodes with ordered scan / seek</text>
+  <rect class="pillSlate" x="602" y="562" width="526" height="92"/>
+  <text class="h3" x="632" y="600">key -&gt; position</text>
+  <text class="mono" x="632" y="630">WAL(file, offset) / SST(file, row)</text>
+  <text class="small" x="602" y="694">Flush does not switch A; readers keep using A.</text>
+
+  <!-- AB Sync -->
+  <rect class="card" x="1270" y="298" width="300" height="430"/>
+  <text class="h2" x="1304" y="352">AB Sync</text>
+  <text class="small" x="1304" y="388">checkpoint / recovery</text>
+  <rect class="pillAmber" x="1304" y="426" width="232" height="70"/>
+  <text class="h3" x="1332" y="469">MANIFEST</text>
+  <rect class="pillBlue" x="1304" y="536" width="232" height="62"/>
+  <text class="chip" x="1332" y="574">A synced: A -&gt; B</text>
+  <rect class="pillTeal" x="1304" y="628" width="232" height="62"/>
+  <text class="chip" x="1332" y="666">B clean: B -&gt; A</text>
+
+  <!-- B index -->
+  <rect class="tealCard" x="1680" y="298" width="616" height="430"/>
+  <rect x="1680" y="298" width="616" height="76" rx="24" fill="#0f766e"/>
+  <text class="h2Light" x="1720" y="348">B Index: Shadow / Checkpoint</text>
+  <text class="body" x="1722" y="418">publishes checkpoints; no normal writes</text>
+  <rect class="pillTeal" x="1722" y="452" width="532" height="84"/>
+  <text class="h3" x="1752" y="489">same minpatricia.Index</text>
+  <text class="small" x="1752" y="516">same shape as A; copy, replay, recover</text>
+  <rect class="pillSlate" x="1722" y="562" width="532" height="92"/>
+  <text class="h3" x="1752" y="600">key -&gt; position</text>
+  <text class="mono" x="1752" y="630">WAL(file, offset) / SST(file, row)</text>
+  <text class="small" x="1722" y="694">B is shadow state, not a runtime promote target.</text>
+
+  <!-- Slim connector lines -->
+  <path class="lineBlue" d="M448 510 C488 510 512 510 548 510"/>
+  <path class="lineBlue dash" d="M1170 500 C1210 500 1228 500 1258 500"/>
+  <path class="lineTeal dash" d="M1570 650 C1610 650 1630 650 1668 650"/>
+  <path class="lineAmber dash" d="M1680 500 C1638 500 1608 500 1582 500"/>
+
+  <!-- Shared service layer -->
+  <rect class="darkCard" x="150" y="824" width="2100" height="402"/>
+  <text class="h2Light" x="204" y="884">Shared Record Service Layer</text>
+  <text class="smallLight" x="204" y="920">A/B indexes store positions only; segmentedRecordStore resolves Key / Value uniformly.</text>
+
+  <rect class="pillSlate" x="1328" y="858" width="842" height="58"/>
+  <text class="chip" x="1360" y="895">Unified API: Key(pos) / Value(pos) / ReplayWAL(fileNo)</text>
+
+  <rect x="208" y="972" width="470" height="176" rx="24" fill="#172554" stroke="#60a5fa" stroke-width="3"/>
+  <text class="h2Light" x="248" y="1024">WAL KVRecord</text>
+  <text class="monoLight" x="248" y="1061">wal/*.wal</text>
+  <text class="smallLight" x="248" y="1096">hot writes; active / sealed segments</text>
+  <text class="smallLight" x="248" y="1126">direct position reads and replay source</text>
+
+  <rect x="826" y="972" width="420" height="176" rx="24" fill="#422006" stroke="#f59e0b" stroke-width="3"/>
+  <text class="h2Light" x="866" y="1024">Minor Compaction</text>
+  <text class="smallLight" x="866" y="1061">scan live puts in sealed WAL</text>
+  <text class="smallLight" x="866" y="1096">sort and write ParquetSST</text>
+  <text class="smallLight" x="866" y="1126">publish via install_sst WAL record</text>
+
+  <rect x="1394" y="972" width="420" height="176" rx="24" fill="#134e4a" stroke="#2dd4bf" stroke-width="3"/>
+  <text class="h2Light" x="1434" y="1024">ParquetSST KVRecord</text>
+  <text class="monoLight" x="1434" y="1061">sst/*.parquet</text>
+  <text class="smallTeal" x="1434" y="1096">compacted immutable records</text>
+  <text class="smallTeal" x="1434" y="1126">same Key(pos) / Value(pos) path as WAL</text>
+
+  <rect x="1908" y="972" width="270" height="176" rx="24" fill="#1e293b" stroke="#94a3b8" stroke-width="2"/>
+  <text class="h3Light" x="1946" y="1030">RecordStore</text>
+  <text class="smallLight" x="1946" y="1068">WAL + SST</text>
+  <text class="smallLight" x="1946" y="1098">serve together</text>
+
+  <!-- Small arrows inside record layer -->
+  <path class="lineAmber" d="M678 1060 C724 1060 770 1060 814 1060"/>
+  <path class="lineAmber" d="M1246 1060 C1292 1060 1338 1060 1382 1060"/>
+  <path class="lineSlate" d="M1814 1060 C1844 1060 1872 1060 1896 1060"/>
+
+  <!-- A/B position resolution lines to service layer -->
+  <path class="lineBlue" d="M865 728 C865 772 865 792 865 812"/>
+  <path class="lineTeal" d="M1988 728 C1988 772 1988 792 1988 812"/>
+
+  <!-- Footer -->
+  <rect class="card" x="104" y="1260" width="2192" height="62"/>
+  <text class="body" x="144" y="1300">In one line: Shadow Index switches the trusted checkpoint boundary; WAL and ParquetSST are both directly readable KVRecord backends.</text>
+</svg>
