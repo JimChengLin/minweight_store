@@ -24,18 +24,34 @@ type runConfig struct {
 	outDir     string
 	keepData   bool
 	iostat     bool
+	gomaxprocs int
+	entries    int
+	valueSize  int
+	maxRSS     string
+	maxData    string
 	sampleRate time.Duration
+
+	minweightWALSize          string
+	minweightMaxImmutableWALs int
+	minweightTargetSSTSize    string
 }
 
 type resourceSample struct {
-	TimeUnixMillis       int64    `json:"time_unix_millis"`
-	ElapsedMillis        int64    `json:"elapsed_millis"`
-	DataBytes            int64    `json:"data_bytes"`
-	DataBytesPerSecond   float64  `json:"data_bytes_per_second"`
-	ProcessCPUPercent    *float64 `json:"process_cpu_percent,omitempty"`
-	ProcessRSSBytes      *int64   `json:"process_rss_bytes,omitempty"`
-	ProcessSampleError   string   `json:"process_sample_error,omitempty"`
-	DirectorySampleError string   `json:"directory_sample_error,omitempty"`
+	TimeUnixMillis        int64    `json:"time_unix_millis"`
+	ElapsedMillis         int64    `json:"elapsed_millis"`
+	DataBytes             int64    `json:"data_bytes"`
+	DataBytesPerSecond    float64  `json:"data_bytes_per_second"`
+	ProcessCPUPercent     *float64 `json:"process_cpu_percent,omitempty"`
+	ProcessRSSBytes       *int64   `json:"process_rss_bytes,omitempty"`
+	ProcessAnonymousBytes *int64   `json:"process_anonymous_bytes,omitempty"`
+	ProcessSampleError    string   `json:"process_sample_error,omitempty"`
+	DirectorySampleError  string   `json:"directory_sample_error,omitempty"`
+}
+
+type resourceResult struct {
+	samples                 []resourceSample
+	limitExceeded           string
+	limitExceededValueBytes int64
 }
 
 type resourceSummary struct {
@@ -43,6 +59,12 @@ type resourceSummary struct {
 	Goos                string           `json:"goos"`
 	Goarch              string           `json:"goarch"`
 	NumCPU              int              `json:"num_cpu"`
+	GOMAXPROCS          int              `json:"gomaxprocs,omitempty"`
+	LargeEntries        int              `json:"large_entries,omitempty"`
+	LargeValueSize      int              `json:"large_value_size,omitempty"`
+	MinweightWALSize    int64            `json:"minweight_wal_size,omitempty"`
+	MinweightMaxImmWALs int              `json:"minweight_max_immutable_wals,omitempty"`
+	MinweightTargetSST  int64            `json:"minweight_target_sst_size,omitempty"`
 	StartedAt           time.Time        `json:"started_at"`
 	FinishedAt          time.Time        `json:"finished_at"`
 	WallSeconds         float64          `json:"wall_seconds"`
@@ -50,6 +72,12 @@ type resourceSummary struct {
 	SystemCPUSeconds    float64          `json:"system_cpu_seconds"`
 	AverageCPUPercent   float64          `json:"average_cpu_percent"`
 	MaxRSSBytes         int64            `json:"max_rss_bytes"`
+	PeakSampleRSSBytes  int64            `json:"peak_sample_rss_bytes,omitempty"`
+	PeakAnonymousBytes  int64            `json:"peak_anonymous_bytes,omitempty"`
+	MemoryLimitBytes    int64            `json:"memory_limit_bytes,omitempty"`
+	DataLimitBytes      int64            `json:"data_limit_bytes,omitempty"`
+	LimitExceeded       string           `json:"limit_exceeded,omitempty"`
+	LimitExceededBytes  int64            `json:"limit_exceeded_value_bytes,omitempty"`
 	BlockInputOps       int64            `json:"block_input_ops"`
 	BlockOutputOps      int64            `json:"block_output_ops"`
 	IostatEnabled       bool             `json:"iostat_enabled"`
@@ -74,6 +102,11 @@ type resourceSummary struct {
 	DataDir             string           `json:"data_dir"`
 	KeepData            bool             `json:"keep_data"`
 	Samples             []resourceSample `json:"-"`
+}
+
+type resourceLimits struct {
+	memoryBytes int64
+	dataBytes   int64
 }
 
 type iostatRun struct {
@@ -105,6 +138,15 @@ type iostatSample struct {
 	writeMBps float64
 }
 
+func (s iostatSample) add(other iostatSample) iostatSample {
+	return iostatSample{
+		mbps:      s.mbps + other.mbps,
+		readWrite: s.readWrite || other.readWrite,
+		readMBps:  s.readMBps + other.readMBps,
+		writeMBps: s.writeMBps + other.writeMBps,
+	}
+}
+
 func main() {
 	cfg := parseFlags()
 	if err := run(cfg); err != nil {
@@ -121,7 +163,15 @@ func parseFlags() runConfig {
 	flag.StringVar(&cfg.outDir, "out", filepath.Join("results", time.Now().Format("20060102-150405")), "output directory")
 	flag.BoolVar(&cfg.keepData, "keep-data", false, "keep benchmark data directories after the run")
 	flag.BoolVar(&cfg.iostat, "iostat", true, "record device-level iostat samples")
+	flag.IntVar(&cfg.gomaxprocs, "gomaxprocs", 0, "set child GOMAXPROCS and -test.cpu")
+	flag.IntVar(&cfg.entries, "entries", 0, "set KVBENCH_LARGE_ENTRIES for large benchmarks")
+	flag.IntVar(&cfg.valueSize, "value-size", 0, "set KVBENCH_LARGE_VALUE_SIZE for large benchmarks")
+	flag.StringVar(&cfg.maxRSS, "max-rss", "0", "soft child anonymous-memory limit when supported; RSS is report-only")
+	flag.StringVar(&cfg.maxData, "max-data", "0", "soft benchmark data directory limit, for example 100GiB")
 	flag.DurationVar(&cfg.sampleRate, "sample-rate", time.Second, "resource sample interval")
+	flag.StringVar(&cfg.minweightWALSize, "minweight-wal-size", "0", "set minweight WALSize, for example 256MiB")
+	flag.IntVar(&cfg.minweightMaxImmutableWALs, "minweight-max-immutable-wals", 0, "set minweight MaxImmutableWALNum")
+	flag.StringVar(&cfg.minweightTargetSSTSize, "minweight-target-sst-size", "0", "set minweight TargetSSTSize, for example 512MiB")
 	flag.Parse()
 	return cfg
 }
@@ -129,6 +179,22 @@ func parseFlags() runConfig {
 func run(cfg runConfig) error {
 	if cfg.sampleRate <= 0 {
 		return fmt.Errorf("sample-rate must be positive")
+	}
+	memoryLimit, err := parseByteSize(cfg.maxRSS)
+	if err != nil {
+		return fmt.Errorf("max-rss: %w", err)
+	}
+	dataLimit, err := parseByteSize(cfg.maxData)
+	if err != nil {
+		return fmt.Errorf("max-data: %w", err)
+	}
+	minweightWALSize, err := parseByteSize(cfg.minweightWALSize)
+	if err != nil {
+		return fmt.Errorf("minweight-wal-size: %w", err)
+	}
+	minweightTargetSSTSize, err := parseByteSize(cfg.minweightTargetSSTSize)
+	if err != nil {
+		return fmt.Errorf("minweight-target-sst-size: %w", err)
 	}
 	if err := os.MkdirAll(cfg.outDir, 0o755); err != nil {
 		return err
@@ -156,12 +222,33 @@ func run(cfg runConfig) error {
 		"-test.benchtime=" + cfg.benchtime,
 		"-test.count=" + strconv.Itoa(cfg.count),
 	}
+	if cfg.gomaxprocs > 0 {
+		args = append(args, "-test.cpu="+strconv.Itoa(cfg.gomaxprocs))
+	}
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Env = append(os.Environ(),
 		"KVBENCH_DATA_DIR="+dataDir,
+		// The runner owns cleanup so resource_summary final_data_bytes can
+		// describe the completed benchmark directory, not a mid-run deletion.
+		"KVBENCH_KEEP_DATA=1",
 	)
-	if cfg.keepData {
-		cmd.Env = append(cmd.Env, "KVBENCH_KEEP_DATA=1")
+	if cfg.gomaxprocs > 0 {
+		cmd.Env = append(cmd.Env, "GOMAXPROCS="+strconv.Itoa(cfg.gomaxprocs))
+	}
+	if cfg.entries > 0 {
+		cmd.Env = append(cmd.Env, "KVBENCH_LARGE_ENTRIES="+strconv.Itoa(cfg.entries))
+	}
+	if cfg.valueSize > 0 {
+		cmd.Env = append(cmd.Env, "KVBENCH_LARGE_VALUE_SIZE="+strconv.Itoa(cfg.valueSize))
+	}
+	if minweightWALSize > 0 {
+		cmd.Env = append(cmd.Env, "KVBENCH_MINWEIGHT_WAL_SIZE="+strconv.FormatInt(minweightWALSize, 10))
+	}
+	if cfg.minweightMaxImmutableWALs > 0 {
+		cmd.Env = append(cmd.Env, "KVBENCH_MINWEIGHT_MAX_IMMUTABLE_WALS="+strconv.Itoa(cfg.minweightMaxImmutableWALs))
+	}
+	if minweightTargetSSTSize > 0 {
+		cmd.Env = append(cmd.Env, "KVBENCH_MINWEIGHT_TARGET_SST_SIZE="+strconv.FormatInt(minweightTargetSSTSize, 10))
 	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -173,35 +260,64 @@ func run(cfg runConfig) error {
 	}
 	iostatSampler := startIostat(filepath.Join(cfg.outDir, "iostat.txt"), cfg.sampleRate, cfg.iostat)
 	stopSampling := make(chan struct{})
-	samplesCh := make(chan []resourceSample, 1)
+	resourcesCh := make(chan resourceResult, 1)
 	go func() {
-		samplesCh <- sampleResources(cmd.Process.Pid, dataDir, cfg.sampleRate, stopSampling)
+		resourcesCh <- sampleResources(cmd.Process.Pid, dataDir, cfg.sampleRate, resourceLimits{
+			memoryBytes: memoryLimit,
+			dataBytes:   dataLimit,
+		}, stopSampling)
 	}()
-	err := cmd.Wait()
-	close(stopSampling)
-	samples := <-samplesCh
-	iostatSummary := iostatSampler.stop()
+	waitErr := cmd.Wait()
 	finishedAt := time.Now()
+	close(stopSampling)
+	resources := <-resourcesCh
+	iostatSummary := iostatSampler.stop()
+	finalSample := resourceSample{
+		TimeUnixMillis: finishedAt.UnixMilli(),
+		ElapsedMillis:  finishedAt.Sub(startedAt).Milliseconds(),
+	}
+	bytes, err := directorySize(dataDir)
+	if err != nil {
+		finalSample.DirectorySampleError = err.Error()
+	} else {
+		finalSample.DataBytes = bytes
+		for i := len(resources.samples) - 1; i >= 0; i-- {
+			previous := resources.samples[i]
+			if previous.DirectorySampleError != "" {
+				continue
+			}
+			elapsedMillis := finalSample.ElapsedMillis - previous.ElapsedMillis
+			if elapsedMillis > 0 {
+				finalSample.DataBytesPerSecond = float64(bytes-previous.DataBytes) / (float64(elapsedMillis) / 1000)
+			}
+			break
+		}
+	}
+	resources.samples = append(resources.samples, finalSample)
+	if dataLimit > 0 && finalSample.DirectorySampleError == "" && finalSample.DataBytes > dataLimit && resources.limitExceeded == "" {
+		resources.limitExceeded = "data"
+		resources.limitExceededValueBytes = finalSample.DataBytes
+	}
 
 	if writeErr := os.WriteFile(benchOutputPath, output.Bytes(), 0o644); writeErr != nil {
 		return writeErr
 	}
 
-	summary := makeSummary(cmd, args, startedAt, finishedAt, dataDir, cfg.keepData, benchOutputPath, samples, iostatSummary)
-	if err != nil {
+	summary := makeSummary(cmd, args, startedAt, finishedAt, dataDir, cfg, memoryLimit, dataLimit, minweightWALSize, minweightTargetSSTSize, benchOutputPath, resources, iostatSummary)
+	if waitErr != nil {
 		summary.BenchmarkError = strings.TrimSpace(output.String())
 		if summary.BenchmarkError == "" {
-			summary.BenchmarkError = err.Error()
+			summary.BenchmarkError = waitErr.Error()
 		}
 	}
-	if err := writeSamples(filepath.Join(cfg.outDir, "resource_samples.csv"), samples); err != nil {
+	if err := writeSamples(filepath.Join(cfg.outDir, "resource_samples.csv"), resources.samples); err != nil {
 		return err
 	}
 	if err := writeSummary(filepath.Join(cfg.outDir, "resource_summary.json"), summary); err != nil {
 		return err
 	}
-	if err != nil {
-		return err
+	if waitErr != nil {
+		return waitErr
 	}
 	return nil
 }
@@ -211,6 +327,45 @@ func buildBenchmarkBinary(binaryPath string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func parseByteSize(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	units := []struct {
+		suffix string
+		scale  int64
+	}{
+		{"tib", 1 << 40},
+		{"gib", 1 << 30},
+		{"mib", 1 << 20},
+		{"kib", 1 << 10},
+		{"tb", 1_000_000_000_000},
+		{"gb", 1_000_000_000},
+		{"mb", 1_000_000},
+		{"kb", 1_000},
+		{"b", 1},
+	}
+	lower := strings.ToLower(value)
+	scale := int64(1)
+	number := value
+	for _, unit := range units {
+		if strings.HasSuffix(lower, unit.suffix) {
+			scale = unit.scale
+			number = strings.TrimSpace(value[:len(value)-len(unit.suffix)])
+			break
+		}
+	}
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, err
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("negative byte size %q", value)
+	}
+	return int64(parsed * float64(scale)), nil
 }
 
 func startIostat(path string, interval time.Duration, enabled bool) *iostatRun {
@@ -275,22 +430,38 @@ func (r *iostatRun) stop() iostatSummary {
 func summarizeIostat(raw string) iostatSummary {
 	var samples []iostatSample
 	var header []string
+	var bucket iostatSample
+	bucketHasSample := false
+	flushBucket := func() {
+		if bucketHasSample {
+			samples = append(samples, bucket)
+			bucket = iostatSample{}
+			bucketHasSample = false
+		}
+	}
 	for _, line := range strings.Split(raw, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
 		if isIostatHeader(fields) {
+			flushBucket()
 			header = fields
 			continue
 		}
 		sample, ok := parseIostatSample(header, fields)
 		if ok {
-			samples = append(samples, sample)
+			if isDarwinIostatHeader(header) {
+				samples = append(samples, sample)
+			} else {
+				bucket = bucket.add(sample)
+				bucketHasSample = true
+			}
 		}
 	}
+	flushBucket()
 	if len(samples) > 1 {
-		// The first iostat row is commonly since-boot state, not benchmark-window IO.
+		// The first iostat bucket is commonly since-boot state, not benchmark-window IO.
 		samples = samples[1:]
 	}
 	return summarizeIostatSamples(samples)
@@ -419,12 +590,12 @@ func summarizeIostatSamples(samples []iostatSample) iostatSummary {
 	return summary
 }
 
-func sampleResources(pid int, dataDir string, interval time.Duration, stop <-chan struct{}) []resourceSample {
+func sampleResources(pid int, dataDir string, interval time.Duration, limits resourceLimits, stop <-chan struct{}) resourceResult {
 	start := time.Now()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var samples []resourceSample
+	result := resourceResult{}
 	var lastBytes int64
 	var lastTime time.Time
 	psAvailable := true
@@ -449,50 +620,112 @@ func sampleResources(pid int, dataDir string, interval time.Duration, stop <-cha
 			lastTime = now
 		}
 		if psAvailable {
-			cpu, rss, err := sampleProcess(pid)
+			process, err := sampleProcess(pid)
 			if err != nil {
 				sample.ProcessSampleError = err.Error()
 				psAvailable = false
 			} else {
-				sample.ProcessCPUPercent = &cpu
-				sample.ProcessRSSBytes = &rss
+				sample.ProcessCPUPercent = &process.cpuPercent
+				sample.ProcessRSSBytes = &process.rssBytes
+				sample.ProcessAnonymousBytes = process.anonymousBytes
 			}
 		}
-		samples = append(samples, sample)
+		result.samples = append(result.samples, sample)
+		if limits.dataBytes > 0 && sample.DirectorySampleError == "" && sample.DataBytes > limits.dataBytes {
+			result.limitExceeded = "data"
+			result.limitExceededValueBytes = sample.DataBytes
+			killProcess(pid)
+			return result
+		}
+		if limits.memoryBytes > 0 && sample.ProcessAnonymousBytes != nil && *sample.ProcessAnonymousBytes > limits.memoryBytes {
+			result.limitExceeded = "memory"
+			result.limitExceededValueBytes = *sample.ProcessAnonymousBytes
+			killProcess(pid)
+			return result
+		}
 
 		select {
 		case <-stop:
-			return samples
+			return result
 		case <-ticker.C:
 		}
 	}
 }
 
-func sampleProcess(pid int) (float64, int64, error) {
+func killProcess(pid int) {
+	process, err := os.FindProcess(pid)
+	if err == nil {
+		_ = process.Kill()
+	}
+}
+
+type processSample struct {
+	cpuPercent     float64
+	rssBytes       int64
+	anonymousBytes *int64
+}
+
+func sampleProcess(pid int) (processSample, error) {
 	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "%cpu=,rss=")
 	output, err := cmd.Output()
 	if err != nil {
-		return 0, 0, err
+		return processSample{}, err
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) < 2 {
-		return 0, 0, fmt.Errorf("unexpected ps output %q", strings.TrimSpace(string(output)))
+		return processSample{}, fmt.Errorf("unexpected ps output %q", strings.TrimSpace(string(output)))
 	}
 	cpu, err := strconv.ParseFloat(fields[0], 64)
 	if err != nil {
-		return 0, 0, err
+		return processSample{}, err
 	}
 	rssKB, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil {
-		return 0, 0, err
+		return processSample{}, err
 	}
-	return cpu, rssKB * 1024, nil
+	sample := processSample{
+		cpuPercent: cpu,
+		rssBytes:   rssKB * 1024,
+	}
+	if runtime.GOOS == "linux" {
+		anonymousBytes, err := sampleLinuxAnonymousMemory(pid)
+		if err != nil {
+			return processSample{}, err
+		}
+		sample.anonymousBytes = &anonymousBytes
+	}
+	return sample, nil
+}
+
+func sampleLinuxAnonymousMemory(pid int) (int64, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "smaps_rollup"))
+	if err != nil {
+		return 0, err
+	}
+	return parseLinuxAnonymousMemory(data)
+}
+
+func parseLinuxAnonymousMemory(data []byte) (int64, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "Anonymous:" {
+			kb, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			return kb * 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("Anonymous not found in smaps_rollup")
 }
 
 func directorySize(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		if entry.IsDir() {
@@ -500,6 +733,9 @@ func directorySize(root string) (int64, error) {
 		}
 		info, err := entry.Info()
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		total += info.Size()
@@ -508,33 +744,44 @@ func directorySize(root string) (int64, error) {
 	return total, err
 }
 
-func makeSummary(cmd *exec.Cmd, args []string, startedAt, finishedAt time.Time, dataDir string, keepData bool, benchOutputPath string, samples []resourceSample, iostat iostatSummary) resourceSummary {
+func makeSummary(cmd *exec.Cmd, args []string, startedAt, finishedAt time.Time, dataDir string, cfg runConfig, memoryLimit, dataLimit, minweightWALSize, minweightTargetSSTSize int64, benchOutputPath string, resources resourceResult, iostat iostatSummary) resourceSummary {
 	summary := resourceSummary{
-		Command:            append([]string{cmd.Path}, args...),
-		Goos:               runtime.GOOS,
-		Goarch:             runtime.GOARCH,
-		NumCPU:             runtime.NumCPU(),
-		StartedAt:          startedAt,
-		FinishedAt:         finishedAt,
-		WallSeconds:        finishedAt.Sub(startedAt).Seconds(),
-		SampleCount:        len(samples),
-		ProcessSampler:     "ps",
-		BenchmarkOutput:    benchOutputPath,
-		DataDir:            dataDir,
-		KeepData:           keepData,
-		Samples:            samples,
-		IostatEnabled:      iostat.enabled,
-		IostatOutput:       iostat.outputPath,
-		IostatError:        iostat.err,
-		IostatSampleCount:  iostat.sampleCount,
-		IostatMBpsAvg:      iostat.mbpsAvg,
-		IostatMBpsMax:      iostat.mbpsMax,
-		IostatReadWrite:    iostat.readWrite,
-		IostatReadMBpsAvg:  iostat.readMBpsAvg,
-		IostatReadMBpsMax:  iostat.readMBpsMax,
-		IostatWriteMBpsAvg: iostat.writeMBpsAvg,
-		IostatWriteMBpsMax: iostat.writeMBpsMax,
+		Command:             append([]string{cmd.Path}, args...),
+		Goos:                runtime.GOOS,
+		Goarch:              runtime.GOARCH,
+		NumCPU:              runtime.NumCPU(),
+		GOMAXPROCS:          cfg.gomaxprocs,
+		LargeEntries:        cfg.entries,
+		LargeValueSize:      cfg.valueSize,
+		MinweightWALSize:    minweightWALSize,
+		MinweightMaxImmWALs: cfg.minweightMaxImmutableWALs,
+		MinweightTargetSST:  minweightTargetSSTSize,
+		StartedAt:           startedAt,
+		FinishedAt:          finishedAt,
+		WallSeconds:         finishedAt.Sub(startedAt).Seconds(),
+		SampleCount:         len(resources.samples),
+		ProcessSampler:      "ps",
+		BenchmarkOutput:     benchOutputPath,
+		DataDir:             dataDir,
+		KeepData:            cfg.keepData,
+		Samples:             resources.samples,
+		MemoryLimitBytes:    memoryLimit,
+		DataLimitBytes:      dataLimit,
+		LimitExceeded:       resources.limitExceeded,
+		LimitExceededBytes:  resources.limitExceededValueBytes,
+		IostatEnabled:       iostat.enabled,
+		IostatOutput:        iostat.outputPath,
+		IostatError:         iostat.err,
+		IostatSampleCount:   iostat.sampleCount,
+		IostatMBpsAvg:       iostat.mbpsAvg,
+		IostatMBpsMax:       iostat.mbpsMax,
+		IostatReadWrite:     iostat.readWrite,
+		IostatReadMBpsAvg:   iostat.readMBpsAvg,
+		IostatReadMBpsMax:   iostat.readMBpsMax,
+		IostatWriteMBpsAvg:  iostat.writeMBpsAvg,
+		IostatWriteMBpsMax:  iostat.writeMBpsMax,
 	}
+	samples := resources.samples
 	if len(samples) != 0 {
 		summary.PeakDataBytes = samples[0].DataBytes
 		summary.FinalDataBytes = samples[len(samples)-1].DataBytes
@@ -544,6 +791,12 @@ func makeSummary(cmd *exec.Cmd, args []string, startedAt, finishedAt time.Time, 
 			}
 			if sample.DataBytesPerSecond > summary.MaxDataBytesPerSec {
 				summary.MaxDataBytesPerSec = sample.DataBytesPerSecond
+			}
+			if sample.ProcessRSSBytes != nil && *sample.ProcessRSSBytes > summary.PeakSampleRSSBytes {
+				summary.PeakSampleRSSBytes = *sample.ProcessRSSBytes
+			}
+			if sample.ProcessAnonymousBytes != nil && *sample.ProcessAnonymousBytes > summary.PeakAnonymousBytes {
+				summary.PeakAnonymousBytes = *sample.ProcessAnonymousBytes
 			}
 			if summary.ProcessSamplerError == "" && sample.ProcessSampleError != "" {
 				summary.ProcessSamplerError = sample.ProcessSampleError
@@ -588,6 +841,7 @@ func writeSamples(path string, samples []resourceSample) error {
 		"data_bytes_per_second",
 		"process_cpu_percent",
 		"process_rss_bytes",
+		"process_anonymous_bytes",
 		"process_sample_error",
 		"directory_sample_error",
 	}); err != nil {
@@ -602,6 +856,10 @@ func writeSamples(path string, samples []resourceSample) error {
 		if sample.ProcessRSSBytes != nil {
 			rss = strconv.FormatInt(*sample.ProcessRSSBytes, 10)
 		}
+		anonymous := ""
+		if sample.ProcessAnonymousBytes != nil {
+			anonymous = strconv.FormatInt(*sample.ProcessAnonymousBytes, 10)
+		}
 		if err := writer.Write([]string{
 			strconv.FormatInt(sample.TimeUnixMillis, 10),
 			strconv.FormatInt(sample.ElapsedMillis, 10),
@@ -609,6 +867,7 @@ func writeSamples(path string, samples []resourceSample) error {
 			strconv.FormatFloat(sample.DataBytesPerSecond, 'f', 2, 64),
 			cpu,
 			rss,
+			anonymous,
 			sample.ProcessSampleError,
 			sample.DirectorySampleError,
 		}); err != nil {

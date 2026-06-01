@@ -160,6 +160,49 @@ itself drains all currently eligible SSTs through capped rounds and only leaves 
 small final tail when the overall live-SST garbage ratio is still below the
 threshold.
 
+## Benchmark Snapshot
+
+The current `kvbench` pass compares `minweight_store` with pure-Go embedded KV
+engines on an Apple M1 Pro using 4 Go threads. The full report is in
+[kvbench/report.md](kvbench/report.md).
+
+Default 9-byte key / 256-byte value load of 100k keys:
+
+| Engine | Time | Throughput | Entries/s |
+| --- | ---: | ---: | ---: |
+| minweight | 50.7ms | 505.30 MB/s | 1,973,840 |
+| pebble | 226.0ms | 113.29 MB/s | 442,540 |
+| buntdb | 548.8ms | 46.65 MB/s | 182,227 |
+| badger | 604.6ms | 42.34 MB/s | 165,396 |
+| goleveldb | 884.0ms | 28.96 MB/s | 113,126 |
+| bbolt | 4.34s | 5.90 MB/s | 23,032 |
+
+Default 100k-key steady-state operations:
+
+| Workload | minweight | Best non-minweight | Result |
+| --- | ---: | ---: | --- |
+| Overwrite | 765.9ns/op | pebble 2.238us/op | minweight leads |
+| Get | 167.3ns/op | buntdb 257.9ns/op | minweight leads |
+| Mixed 90R/10W | 419.1ns/op | buntdb 907.5ns/op | minweight leads |
+| SeekGE | 246.0ns/op | buntdb 323.3ns/op | minweight leads |
+| Scan 100k | 11.6ms | bbolt 1.39ms | minweight weak spot |
+
+Large load with 6M entries and 2KiB values, writing 12.29GB raw value data:
+
+| Engine | Time | Throughput | Entries/s | Approx. directory increment |
+| --- | ---: | ---: | ---: | ---: |
+| minweight | 31.9s | 385.63 MB/s | 188,296 | 13.13GB |
+| goleveldb | 191.4s | 64.21 MB/s | 31,354 | 8.59GB |
+| badger | 193.9s | 63.37 MB/s | 30,940 | 15.46GB |
+| pebble | 227.5s | 54.00 MB/s | 26,370 | 12.56GB |
+| bbolt | 358.6s | 34.27 MB/s | 16,733 | 29.22GB |
+| buntdb | 514.0s | 23.91 MB/s | 11,673 | 17.12GB |
+
+These numbers are workload and machine specific. On macOS, RSS is reported but
+not used as a hard memory limit because file-backed mmap pages are counted in
+RSS. The benchmark report documents commands, resource limits, result tables,
+and known harness limitations.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

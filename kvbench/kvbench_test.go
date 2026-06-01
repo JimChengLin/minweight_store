@@ -2,12 +2,13 @@ package kvbench
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -25,6 +26,11 @@ const (
 	benchDatasetSize = 100_000
 	benchValueSize   = 256
 	bboltBucketName  = "kv"
+)
+
+const (
+	defaultLargeBenchEntries   = 100_000
+	defaultLargeBenchValueSize = 4096
 )
 
 var errKeyNotFound = errors.New("key not found")
@@ -59,12 +65,34 @@ func storeFactories() []storeFactory {
 	}
 }
 
-func BenchmarkSet(b *testing.B) {
+func BenchmarkLoad(b *testing.B) {
+	keys := benchKeys(benchDatasetSize)
+	values := benchValues(benchDatasetSize)
+	for _, factory := range storeFactories() {
+		b.Run(factory.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(benchDatasetSize * benchValueSize))
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				b.StopTimer()
+				store := openBenchStore(b, factory)
+				b.StartTimer()
+				preloadBenchStore(b, store, keys, values)
+				b.StopTimer()
+				closeBenchStore(b, store)
+			}
+			b.ReportMetric(float64(b.N*benchDatasetSize)/b.Elapsed().Seconds(), "entries/s")
+		})
+	}
+}
+
+func BenchmarkOverwrite(b *testing.B) {
 	keys := benchKeys(benchDatasetSize)
 	values := benchValues(benchDatasetSize)
 	for _, factory := range storeFactories() {
 		b.Run(factory.name, func(b *testing.B) {
 			store := openBenchStore(b, factory)
+			preloadBenchStore(b, store, keys, values)
 			b.ReportAllocs()
 			b.SetBytes(benchValueSize)
 			b.ResetTimer()
@@ -216,6 +244,87 @@ func BenchmarkSeekGE(b *testing.B) {
 	}
 }
 
+func BenchmarkLargeLoad(b *testing.B) {
+	cfg := largeBenchConfigFromEnv(b)
+	for _, factory := range storeFactories() {
+		b.Run(factory.name, func(b *testing.B) {
+			store := openBenchStore(b, factory)
+			key := make([]byte, 0, largeBenchKeySize)
+			value := make([]byte, cfg.valueSize)
+			b.ReportAllocs()
+			b.SetBytes(int64(cfg.entries) * int64(cfg.valueSize))
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for i := 0; i < cfg.entries; i++ {
+					key = largeBenchKey(key, i)
+					fillLargeBenchValue(value, i)
+					if err := store.Put(key, value); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			b.ReportMetric(float64(b.N*cfg.entries)/b.Elapsed().Seconds(), "entries/s")
+			b.StopTimer()
+			closeBenchStore(b, store)
+		})
+	}
+}
+
+func BenchmarkLargeGet(b *testing.B) {
+	cfg := largeBenchConfigFromEnv(b)
+	for _, factory := range storeFactories() {
+		b.Run(factory.name, func(b *testing.B) {
+			store := openBenchStore(b, factory)
+			preloadLargeBenchStore(b, store, cfg)
+			key := make([]byte, 0, largeBenchKeySize)
+			b.ReportAllocs()
+			b.SetBytes(int64(cfg.valueSize))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				key = largeBenchKey(key, i%cfg.entries)
+				value, ok, err := store.Get(key)
+				if err != nil || !ok {
+					b.Fatalf("Get = (%d,%v,%v), want value,true,nil", len(value), ok, err)
+				}
+			}
+			b.StopTimer()
+			closeBenchStore(b, store)
+		})
+	}
+}
+
+func BenchmarkLargeScan(b *testing.B) {
+	cfg := largeBenchConfigFromEnv(b)
+	for _, factory := range storeFactories() {
+		b.Run(factory.name, func(b *testing.B) {
+			store := openBenchStore(b, factory)
+			ordered, ok := store.(orderedStore)
+			if !ok {
+				b.Skip("store has no ordered scan")
+			}
+			preloadLargeBenchStore(b, ordered, cfg)
+			b.ReportAllocs()
+			b.SetBytes(int64(cfg.entries) * int64(cfg.valueSize))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				if err := ordered.Scan(func(_, _ []byte) bool {
+					count++
+					return true
+				}); err != nil {
+					b.Fatal(err)
+				}
+				if count != cfg.entries {
+					b.Fatalf("scan count = %d, want %d", count, cfg.entries)
+				}
+			}
+			b.ReportMetric(float64(b.N*cfg.entries)/b.Elapsed().Seconds(), "entries/s")
+			b.StopTimer()
+			closeBenchStore(b, ordered)
+		})
+	}
+}
+
 func BenchmarkMinweightTuningSet(b *testing.B) {
 	keys := benchKeys(benchDatasetSize)
 	values := benchValues(benchDatasetSize)
@@ -314,6 +423,76 @@ func benchValues(n int) [][]byte {
 	return values
 }
 
+type largeBenchConfig struct {
+	entries   int
+	valueSize int
+}
+
+const largeBenchKeySize = len("key0000000000000000")
+
+func largeBenchConfigFromEnv(b *testing.B) largeBenchConfig {
+	b.Helper()
+
+	return largeBenchConfig{
+		entries:   envInt(b, "KVBENCH_LARGE_ENTRIES", defaultLargeBenchEntries),
+		valueSize: envInt(b, "KVBENCH_LARGE_VALUE_SIZE", defaultLargeBenchValueSize),
+	}
+}
+
+func envInt(b *testing.B, name string, defaultValue int) int {
+	b.Helper()
+
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		b.Fatalf("%s = %q, want positive integer", name, value)
+	}
+	return parsed
+}
+
+func preloadLargeBenchStore(b *testing.B, store pointStore, cfg largeBenchConfig) {
+	b.Helper()
+
+	key := make([]byte, 0, largeBenchKeySize)
+	value := make([]byte, cfg.valueSize)
+	for i := 0; i < cfg.entries; i++ {
+		key = largeBenchKey(key, i)
+		fillLargeBenchValue(value, i)
+		if err := store.Put(key, value); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func largeBenchKey(dst []byte, i int) []byte {
+	dst = dst[:0]
+	dst = append(dst, "key"...)
+	for div := 1_000_000_000_000_000; div > 0; div /= 10 {
+		dst = append(dst, byte('0'+(i/div)%10))
+	}
+	return dst
+}
+
+func fillLargeBenchValue(dst []byte, i int) {
+	x := uint64(i+1) * 0x9e3779b97f4a7c15
+	j := 0
+	for ; j+8 <= len(dst); j += 8 {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		binary.LittleEndian.PutUint64(dst[j:j+8], x)
+	}
+	for ; j < len(dst); j++ {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		dst[j] = byte(x)
+	}
+}
+
 func cloneBytes(v []byte) []byte {
 	return append([]byte(nil), v...)
 }
@@ -323,7 +502,11 @@ type minweightStore struct {
 }
 
 func openMinweightStore(_ *testing.B, dir string) (pointStore, error) {
-	return openMinweightStoreWithOptions(dir, minweight.Options{})
+	options, err := minweightOptionsFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return openMinweightStoreWithOptions(dir, options)
 }
 
 type minweightTuningVariant struct {
@@ -352,12 +535,55 @@ func openMinweightTuningStore(b *testing.B, options minweight.Options) pointStor
 }
 
 func openMinweightStoreWithOptions(dir string, options minweight.Options) (pointStore, error) {
-	options.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	store, err := minweight.Open(dir, options)
 	if err != nil {
 		return nil, err
 	}
 	return &minweightStore{store: store}, nil
+}
+
+func minweightOptionsFromEnv() (minweight.Options, error) {
+	walSize, err := envOptionInt64("KVBENCH_MINWEIGHT_WAL_SIZE")
+	if err != nil {
+		return minweight.Options{}, err
+	}
+	maxImmutableWALs, err := envOptionInt("KVBENCH_MINWEIGHT_MAX_IMMUTABLE_WALS")
+	if err != nil {
+		return minweight.Options{}, err
+	}
+	targetSSTSize, err := envOptionInt64("KVBENCH_MINWEIGHT_TARGET_SST_SIZE")
+	if err != nil {
+		return minweight.Options{}, err
+	}
+	return minweight.Options{
+		WALSize:            walSize,
+		MaxImmutableWALNum: maxImmutableWALs,
+		TargetSSTSize:      targetSSTSize,
+	}, nil
+}
+
+func envOptionInt64(name string) (int64, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s = %q, want non-negative integer", name, value)
+	}
+	return parsed, nil
+}
+
+func envOptionInt(name string) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s = %q, want non-negative integer", name, value)
+	}
+	return parsed, nil
 }
 
 func benchStoreDir(b *testing.B, name string) string {
@@ -367,7 +593,21 @@ func benchStoreDir(b *testing.B, name string) string {
 	if root == "" {
 		return filepath.Join(b.TempDir(), name)
 	}
-	dir, err := os.MkdirTemp(root, sanitizeBenchName(b.Name()+"-"+name)+"-")
+	prefix := sanitizeBenchName(b.Name()+"-"+name) + "-"
+	if os.Getenv("KVBENCH_KEEP_DATA") != "" {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), prefix) {
+				if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+	dir, err := os.MkdirTemp(root, prefix)
 	if err != nil {
 		b.Fatal(err)
 	}
