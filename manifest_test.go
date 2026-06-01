@@ -137,7 +137,7 @@ func TestManifestRecordsLiveSSTDeletedEntries(t *testing.T) {
 	state.liveSSTs = []manifestLiveSST{
 		{fileNo: 4, deletedEntries: 1},
 		{fileNo: 7, deletedEntries: 3},
-		{fileNo: 9, deletedEntries: 0},
+		{fileNo: 9, deletedEntries: recordOffsetLimit},
 	}
 
 	if err := writeManifest(path, state); err != nil {

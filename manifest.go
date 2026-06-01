@@ -11,10 +11,10 @@ import (
 
 const (
 	manifestName                    = "MANIFEST"
-	manifestVersion          uint32 = 7
+	manifestVersion          uint32 = 8
 	manifestSize                    = 1 << 20
 	manifestRecordHeaderSize        = 64
-	manifestLiveSSTEntrySize        = 16
+	manifestLiveSSTEntrySize        = 8
 
 	manifestVersionOffset           = 0
 	manifestRecordSizeOffset        = 4
@@ -27,6 +27,10 @@ const (
 	manifestSeqOffset               = 48
 	manifestCRCOffset               = 56
 	manifestLiveSSTOffset           = manifestRecordHeaderSize
+
+	manifestLiveSSTDeletedEntriesBits  = 31
+	manifestLiveSSTDeletedEntriesLimit = uint64(1) << manifestLiveSSTDeletedEntriesBits
+	manifestLiveSSTDeletedEntriesMask  = manifestLiveSSTDeletedEntriesLimit - 1
 )
 
 type manifest struct {
@@ -221,9 +225,10 @@ func decodeManifestRecord(data []byte, offset int) (manifestRecord, int, bool) {
 	liveSSTs := make([]manifestLiveSST, meta.liveSSTCount)
 	for i := range liveSSTs {
 		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
+		packed := binary.LittleEndian.Uint64(data[start : start+8])
 		liveSSTs[i] = manifestLiveSST{
-			fileNo:         binary.LittleEndian.Uint64(data[start : start+8]),
-			deletedEntries: binary.LittleEndian.Uint64(data[start+8 : start+16]),
+			fileNo:         packed >> manifestLiveSSTDeletedEntriesBits,
+			deletedEntries: packed & manifestLiveSSTDeletedEntriesMask,
 		}
 	}
 	state := manifestState{
@@ -266,8 +271,8 @@ func encodeManifestRecord(state manifestState, seq uint64) ([]byte, error) {
 	binary.LittleEndian.PutUint64(data[manifestSeqOffset:manifestSeqOffset+8], seq)
 	for i, sst := range state.liveSSTs {
 		start := manifestLiveSSTOffset + i*manifestLiveSSTEntrySize
-		binary.LittleEndian.PutUint64(data[start:start+8], sst.fileNo)
-		binary.LittleEndian.PutUint64(data[start+8:start+16], sst.deletedEntries)
+		packed := sst.fileNo<<manifestLiveSSTDeletedEntriesBits | sst.deletedEntries
+		binary.LittleEndian.PutUint64(data[start:start+8], packed)
 	}
 	binary.LittleEndian.PutUint32(data[manifestCRCOffset:manifestCRCOffset+4], manifestRecordCRC(data))
 	return data, nil
