@@ -3,6 +3,7 @@ package minweight_store
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -203,6 +204,37 @@ func TestParquetRecordStoreDefaultPageSize(t *testing.T) {
 	}
 	if offsetIndex.NumPages() <= 1 {
 		t.Fatalf("value pages = %d, want more than 1", offsetIndex.NumPages())
+	}
+}
+
+func TestParquetRecordStoreSkipsPageStatsAndBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.parquet")
+	records := make([]parquetRecord, 512)
+	for i := range records {
+		value := make([]byte, 4096)
+		x := uint64(i+1) * 0x9e3779b97f4a7c15
+		for j := range value {
+			x ^= x << 13
+			x ^= x >> 7
+			x ^= x << 17
+			value[j] = byte(x)
+		}
+		records[i] = parquetRecord{
+			Key:   []byte(fmt.Sprintf("key%016d", i)),
+			Value: value,
+		}
+	}
+
+	store, _ := buildParquetRecordStoreForTest(t, path, records)
+	defer closeForTest(t, store)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawValueBytes := int64(len(records) * len(records[0].Value))
+	if info.Size() > rawValueBytes*2 {
+		t.Fatalf("parquet size = %d, want less than 2x raw value bytes %d", info.Size(), rawValueBytes)
 	}
 }
 

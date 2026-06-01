@@ -90,9 +90,16 @@ func createParquetRecordStore(path string, fileNo uint64, options ...parquet.Wri
 		path:   path,
 		fileNo: fileNo,
 		build: &parquetRecordStoreBuilder{
-			tmpPath:            tmp,
-			file:               file,
-			writer:             parquet.NewGenericWriter[parquetRecord](file, config),
+			tmpPath: tmp,
+			file:    file,
+			writer: parquet.NewGenericWriter[parquetRecord](
+				file,
+				config,
+				parquet.SkipPageStatistics("key"),
+				parquet.SkipPageStatistics("value"),
+				parquet.SkipPageBounds("key"),
+				parquet.SkipPageBounds("value"),
+			),
 			maxRowsPerRowGroup: uint64(config.MaxRowsPerRowGroup),
 		},
 	}
