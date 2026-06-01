@@ -275,7 +275,9 @@ func BenchmarkLargeGet(b *testing.B) {
 	for _, factory := range storeFactories() {
 		b.Run(factory.name, func(b *testing.B) {
 			store := openBenchStore(b, factory)
-			preloadLargeBenchStore(b, store, cfg)
+			if !reuseLargeLoadData(b) {
+				preloadLargeBenchStore(b, store, cfg)
+			}
 			key := make([]byte, 0, largeBenchKeySize)
 			b.ReportAllocs()
 			b.SetBytes(int64(cfg.valueSize))
@@ -302,7 +304,9 @@ func BenchmarkLargeScan(b *testing.B) {
 			if !ok {
 				b.Skip("store has no ordered scan")
 			}
-			preloadLargeBenchStore(b, ordered, cfg)
+			if !reuseLargeLoadData(b) {
+				preloadLargeBenchStore(b, ordered, cfg)
+			}
 			b.ReportAllocs()
 			b.SetBytes(int64(cfg.entries) * int64(cfg.valueSize))
 			b.ResetTimer()
@@ -593,6 +597,13 @@ func benchStoreDir(b *testing.B, name string) string {
 	if root == "" {
 		return filepath.Join(b.TempDir(), name)
 	}
+	if reuseLargeLoadData(b) {
+		dir, err := largeLoadStoreDir(os.Getenv("KVBENCH_REUSE_LARGE_LOAD_DATA_DIR"), name)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return dir
+	}
 	prefix := sanitizeBenchName(b.Name()+"-"+name) + "-"
 	if os.Getenv("KVBENCH_KEEP_DATA") != "" {
 		entries, err := os.ReadDir(root)
@@ -617,6 +628,38 @@ func benchStoreDir(b *testing.B, name string) string {
 		})
 	}
 	return dir
+}
+
+func reuseLargeLoadData(b *testing.B) bool {
+	name := b.Name()
+	return os.Getenv("KVBENCH_REUSE_LARGE_LOAD_DATA_DIR") != "" &&
+		(strings.HasPrefix(name, "BenchmarkLargeGet/") ||
+			strings.HasPrefix(name, "BenchmarkLargeScan/"))
+}
+
+func largeLoadStoreDir(root, name string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("KVBENCH_REUSE_LARGE_LOAD_DATA_DIR is empty")
+	}
+	prefix := sanitizeBenchName("BenchmarkLargeLoad/"+name+"-"+name) + "-"
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	var match string
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		if match != "" {
+			return "", fmt.Errorf("multiple large-load data dirs match %q under %s", prefix, root)
+		}
+		match = filepath.Join(root, entry.Name())
+	}
+	if match == "" {
+		return "", fmt.Errorf("no large-load data dir matches %q under %s", prefix, root)
+	}
+	return match, nil
 }
 
 func sanitizeBenchName(name string) string {

@@ -18,18 +18,19 @@ import (
 )
 
 type runConfig struct {
-	bench      string
-	benchtime  string
-	count      int
-	outDir     string
-	keepData   bool
-	iostat     bool
-	gomaxprocs int
-	entries    int
-	valueSize  int
-	maxRSS     string
-	maxData    string
-	sampleRate time.Duration
+	bench              string
+	benchtime          string
+	count              int
+	outDir             string
+	keepData           bool
+	iostat             bool
+	gomaxprocs         int
+	entries            int
+	valueSize          int
+	maxRSS             string
+	maxData            string
+	sampleRate         time.Duration
+	reuseLargeLoadData string
 
 	minweightWALSize          string
 	minweightMaxImmutableWALs int
@@ -101,6 +102,7 @@ type resourceSummary struct {
 	BenchmarkOutput     string           `json:"benchmark_output"`
 	DataDir             string           `json:"data_dir"`
 	KeepData            bool             `json:"keep_data"`
+	ReuseLargeLoadData  string           `json:"reuse_large_load_data,omitempty"`
 	Samples             []resourceSample `json:"-"`
 }
 
@@ -169,6 +171,7 @@ func parseFlags() runConfig {
 	flag.StringVar(&cfg.maxRSS, "max-rss", "0", "soft child anonymous-memory limit when supported; RSS is report-only")
 	flag.StringVar(&cfg.maxData, "max-data", "0", "soft benchmark data directory limit, for example 100GiB")
 	flag.DurationVar(&cfg.sampleRate, "sample-rate", time.Second, "resource sample interval")
+	flag.StringVar(&cfg.reuseLargeLoadData, "reuse-large-load-data", "", "reuse data/ from a kept BenchmarkLargeLoad run for BenchmarkLargeGet or BenchmarkLargeScan")
 	flag.StringVar(&cfg.minweightWALSize, "minweight-wal-size", "0", "set minweight WALSize, for example 256MiB")
 	flag.IntVar(&cfg.minweightMaxImmutableWALs, "minweight-max-immutable-wals", 0, "set minweight MaxImmutableWALNum")
 	flag.StringVar(&cfg.minweightTargetSSTSize, "minweight-target-sst-size", "0", "set minweight TargetSSTSize, for example 512MiB")
@@ -207,6 +210,10 @@ func run(cfg runConfig) error {
 		defer func() {
 			_ = os.RemoveAll(dataDir)
 		}()
+	}
+	sampleDataDir := dataDir
+	if cfg.reuseLargeLoadData != "" {
+		sampleDataDir = cfg.reuseLargeLoadData
 	}
 
 	binaryPath := filepath.Join(cfg.outDir, "kvbench.test")
@@ -250,6 +257,9 @@ func run(cfg runConfig) error {
 	if minweightTargetSSTSize > 0 {
 		cmd.Env = append(cmd.Env, "KVBENCH_MINWEIGHT_TARGET_SST_SIZE="+strconv.FormatInt(minweightTargetSSTSize, 10))
 	}
+	if cfg.reuseLargeLoadData != "" {
+		cmd.Env = append(cmd.Env, "KVBENCH_REUSE_LARGE_LOAD_DATA_DIR="+cfg.reuseLargeLoadData)
+	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -262,7 +272,7 @@ func run(cfg runConfig) error {
 	stopSampling := make(chan struct{})
 	resourcesCh := make(chan resourceResult, 1)
 	go func() {
-		resourcesCh <- sampleResources(cmd.Process.Pid, dataDir, cfg.sampleRate, resourceLimits{
+		resourcesCh <- sampleResources(cmd.Process.Pid, sampleDataDir, cfg.sampleRate, resourceLimits{
 			memoryBytes: memoryLimit,
 			dataBytes:   dataLimit,
 		}, stopSampling)
@@ -276,7 +286,7 @@ func run(cfg runConfig) error {
 		TimeUnixMillis: finishedAt.UnixMilli(),
 		ElapsedMillis:  finishedAt.Sub(startedAt).Milliseconds(),
 	}
-	bytes, err := directorySize(dataDir)
+	bytes, err := directorySize(sampleDataDir)
 	if err != nil {
 		finalSample.DirectorySampleError = err.Error()
 	} else {
@@ -303,7 +313,7 @@ func run(cfg runConfig) error {
 		return writeErr
 	}
 
-	summary := makeSummary(cmd, args, startedAt, finishedAt, dataDir, cfg, memoryLimit, dataLimit, minweightWALSize, minweightTargetSSTSize, benchOutputPath, resources, iostatSummary)
+	summary := makeSummary(cmd, args, startedAt, finishedAt, sampleDataDir, cfg, memoryLimit, dataLimit, minweightWALSize, minweightTargetSSTSize, benchOutputPath, resources, iostatSummary)
 	if waitErr != nil {
 		summary.BenchmarkError = strings.TrimSpace(output.String())
 		if summary.BenchmarkError == "" {
@@ -764,6 +774,7 @@ func makeSummary(cmd *exec.Cmd, args []string, startedAt, finishedAt time.Time, 
 		BenchmarkOutput:     benchOutputPath,
 		DataDir:             dataDir,
 		KeepData:            cfg.keepData,
+		ReuseLargeLoadData:  cfg.reuseLargeLoadData,
 		Samples:             resources.samples,
 		MemoryLimitBytes:    memoryLimit,
 		DataLimitBytes:      dataLimit,

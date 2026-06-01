@@ -1,15 +1,101 @@
 # minweight_store
 
-`minweight_store` is a small single-node ordered KV store. The current storage
-behavior is summarized below.
+`minweight_store` is a small single-node ordered KV store built around
+[`minpatricia`](https://github.com/JimChengLin/minpatricia). It treats ordered
+seek and scan as first-class operations, not as an afterthought on top of a
+point-key store.
+
+`New` creates an in-memory ordered KV store. `Open` creates the disk-backed
+store with mmap WAL segments, shadow checkpoint indexes, and Parquet SST files.
+
+## Quick View
+
+### Architecture
 
 ![minweight_store architecture](docs/assets/architecture/minweight_store_shadow_index_architecture.svg)
 
-`New` creates an in-memory ordered KV store backed by
-[`minpatricia`](https://github.com/JimChengLin/minpatricia). `Open` creates the
-disk-backed implementation described below.
+The disk-backed store is intentionally small:
 
-## Basic API
+| Component | Role |
+| --- | --- |
+| Primary index | Live `minpatricia` index used by all reads, writes, seeks, and scans. |
+| WAL segments | Fixed-size mmap record segments under `wal/*.wal`; new writes first land here. |
+| Secondary index | Checkpoint index updated during flush/recovery; it is not on the read path. |
+| Manifest | 1MiB append log that records the durable checkpoint boundary and live SST set. |
+| SST files | Compacted records under `sst/*.parquet`; these are standard Parquet files and can be read by external Parquet tooling. |
+
+The core idea is that runtime reads always use the primary index. Flush and
+recovery synchronize a secondary checkpoint index without promoting or swapping
+the live index.
+
+### Design Highlights
+
+- Ordered access is native: `SeekGE`, `SeekLE`, forward scan, reverse scan, and
+  bounded range scan all come from the underlying ordered index.
+- Disk SSTs are Parquet files. Compacted data is not trapped in a custom block
+  format; offline tools can inspect `sst/*.parquet` directly.
+- Flush is shadow-index based. It blocks writes while sealing/syncing WAL state,
+  but readers continue to use the primary index.
+- Recovery state is explicit. `MANIFEST`, WAL segments, primary index, secondary
+  index, and SST file numbers have a small crash-state machine instead of a
+  broad best-effort cleanup path.
+- The implementation is designed to stay understandable: one live index, one
+  checkpoint index, one shared file-number space for WAL and SST record
+  segments.
+
+### Benchmark Snapshot
+
+The current `kvbench` pass compares `minweight_store` with pure-Go embedded KV
+engines on an Apple M1 Pro using 4 Go threads. The full report is in
+[kvbench/report.md](kvbench/report.md).
+
+Default 9-byte key / 256-byte value load of 100k keys:
+
+| Engine | Time | Throughput | Entries/s |
+| --- | ---: | ---: | ---: |
+| minweight | 50.7ms | 505.30 MB/s | 1,973,840 |
+| pebble | 226.0ms | 113.29 MB/s | 442,540 |
+| buntdb | 548.8ms | 46.65 MB/s | 182,227 |
+| badger | 604.6ms | 42.34 MB/s | 165,396 |
+| goleveldb | 884.0ms | 28.96 MB/s | 113,126 |
+| bbolt | 4.34s | 5.90 MB/s | 23,032 |
+
+Default 100k-key steady-state operations:
+
+| Workload | minweight | badger | bbolt | buntdb | goleveldb | pebble |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Overwrite | 765.9ns/op | 7.301us/op | 41.310us/op | 5.767us/op | 7.861us/op | 2.238us/op |
+| Get | 167.3ns/op | 1.225us/op | 698.1ns/op | 257.9ns/op | 1.173us/op | 6.564us/op |
+| Mixed 90R/10W | 419.1ns/op | 2.379us/op | 4.833us/op | 907.5ns/op | 2.516us/op | 8.860us/op |
+| SeekGE | 246.0ns/op | 47.397us/op | 753.6ns/op | 323.3ns/op | 4.017us/op | 7.447us/op |
+| Scan 100k | 11.6ms | 36.6ms | 1.39ms | 9.53ms | 23.6ms | 21.0ms |
+
+Large load with 6M entries and 2KiB values, writing 12.29GB raw value data:
+
+| Engine | Time | Throughput | Entries/s | Approx. directory increment |
+| --- | ---: | ---: | ---: | ---: |
+| minweight | 31.9s | 385.63 MB/s | 188,296 | 13.13GB |
+| goleveldb | 191.4s | 64.21 MB/s | 31,354 | 8.59GB |
+| badger | 193.9s | 63.37 MB/s | 30,940 | 15.46GB |
+| pebble | 227.5s | 54.00 MB/s | 26,370 | 12.56GB |
+| bbolt | 358.6s | 34.27 MB/s | 16,733 | 29.22GB |
+| buntdb | 514.0s | 23.91 MB/s | 11,673 | 17.12GB |
+
+Large point reads after loading the same 6M-entry / 2KiB-value dataset:
+
+| Engine | Get latency | Read throughput | Wall time | Final data size |
+| --- | ---: | ---: | ---: | ---: |
+| minweight | 3.349us/op | 611.59 MB/s | 78.0s | 13.14GB |
+| goleveldb | 5.921us/op | 345.90 MB/s | 407.0s | 12.52GB |
+| pebble | 55.897us/op | 36.64 MB/s | 423.6s | 12.53GB |
+
+These numbers are workload and machine specific. On macOS, RSS is reported but
+not used as a hard memory limit because file-backed mmap pages are counted in
+RSS. The benchmark report documents commands, resource limits, result tables,
+and known harness limitations. Large scan is deferred in this pass because
+rebuilding and scanning multi-GB stores on the laptop is too time-consuming.
+
+### Basic API
 
 ```go
 store := minweight_store.New()
@@ -41,7 +127,7 @@ Range semantics:
 - `Delete` on a missing key returns `(false, nil)`. In WAL-backed stores it does
   not write a delete record for that miss.
 
-## V1 mmap WAL + flush
+## Detailed Design
 
 The disk-backed implementation currently builds on Darwin and Linux.
 
@@ -161,49 +247,6 @@ Like the minor dispatcher, each wake calls the compaction method once; the metho
 itself drains all currently eligible SSTs through capped rounds and only leaves a
 small final tail when the overall live-SST garbage ratio is still below the
 threshold.
-
-## Benchmark Snapshot
-
-The current `kvbench` pass compares `minweight_store` with pure-Go embedded KV
-engines on an Apple M1 Pro using 4 Go threads. The full report is in
-[kvbench/report.md](kvbench/report.md).
-
-Default 9-byte key / 256-byte value load of 100k keys:
-
-| Engine | Time | Throughput | Entries/s |
-| --- | ---: | ---: | ---: |
-| minweight | 50.7ms | 505.30 MB/s | 1,973,840 |
-| pebble | 226.0ms | 113.29 MB/s | 442,540 |
-| buntdb | 548.8ms | 46.65 MB/s | 182,227 |
-| badger | 604.6ms | 42.34 MB/s | 165,396 |
-| goleveldb | 884.0ms | 28.96 MB/s | 113,126 |
-| bbolt | 4.34s | 5.90 MB/s | 23,032 |
-
-Default 100k-key steady-state operations:
-
-| Workload | minweight | Best non-minweight | Result |
-| --- | ---: | ---: | --- |
-| Overwrite | 765.9ns/op | pebble 2.238us/op | minweight leads |
-| Get | 167.3ns/op | buntdb 257.9ns/op | minweight leads |
-| Mixed 90R/10W | 419.1ns/op | buntdb 907.5ns/op | minweight leads |
-| SeekGE | 246.0ns/op | buntdb 323.3ns/op | minweight leads |
-| Scan 100k | 11.6ms | bbolt 1.39ms | minweight weak spot |
-
-Large load with 6M entries and 2KiB values, writing 12.29GB raw value data:
-
-| Engine | Time | Throughput | Entries/s | Approx. directory increment |
-| --- | ---: | ---: | ---: | ---: |
-| minweight | 31.9s | 385.63 MB/s | 188,296 | 13.13GB |
-| goleveldb | 191.4s | 64.21 MB/s | 31,354 | 8.59GB |
-| badger | 193.9s | 63.37 MB/s | 30,940 | 15.46GB |
-| pebble | 227.5s | 54.00 MB/s | 26,370 | 12.56GB |
-| bbolt | 358.6s | 34.27 MB/s | 16,733 | 29.22GB |
-| buntdb | 514.0s | 23.91 MB/s | 11,673 | 17.12GB |
-
-These numbers are workload and machine specific. On macOS, RSS is reported but
-not used as a hard memory limit because file-backed mmap pages are counted in
-RSS. The benchmark report documents commands, resource limits, result tables,
-and known harness limitations.
 
 ## License
 

@@ -44,9 +44,14 @@ Large tier:
 - Value size: 2KiB
 - Entry count: 6,000,000
 - Raw value bytes: 12.29GB
-- Workload: `BenchmarkLargeLoad`, run with `-benchtime=1x`.
+- Workloads:
+  - `BenchmarkLargeLoad`, run with `-benchtime=1x`.
+  - `BenchmarkLargeGet`, run with 1,000 measured point reads after loading the
+    same logical dataset shape.
 - This tier is meant to exceed the 10GB memory budget and exercise WAL, flush,
-  minor compaction, SST write path, and final on-disk footprint.
+  minor compaction, SST write path, final on-disk footprint, and large point
+  reads. Large scan is deferred because rebuilding multi-GB stores for scan
+  comparison is too expensive for this laptop pass.
 
 ## Commands
 
@@ -97,6 +102,28 @@ go run ./cmd/kvbenchrun \
   -out results/eval-large-load-6m-2k
 ```
 
+Large get, measured on selected engines:
+
+```sh
+env GOCACHE=/private/tmp/go-build-minweight-kvbench \
+go run ./cmd/kvbenchrun \
+  -bench '^BenchmarkLargeGet/minweight$' \
+  -benchtime=1000x \
+  -count=1 \
+  -entries=6000000 \
+  -value-size=2048 \
+  -gomaxprocs=4 \
+  -max-rss=10GiB \
+  -max-data=100GB \
+  -sample-rate=2s \
+  -out results/eval-large-get-6m-2k-minweight-1000x
+```
+
+The same command shape was used for `goleveldb` and `pebble`. `badger` and
+`buntdb` were not completed in the large-get table: the all-engine large-get
+attempt hit the 100GB data cap while running `badger`, and a later run showed
+`buntdb` as the long-pole preload path before it was stopped.
+
 ## Results
 
 ### Default Load
@@ -112,13 +139,17 @@ go run ./cmd/kvbenchrun \
 
 ### Default Steady-State Operations
 
-| Workload | minweight | Best non-minweight | Notes |
-| --- | ---: | ---: | --- |
-| Overwrite | 765.9ns/op | pebble 2.238us/op | minweight is fastest in this run. |
-| Get | 167.3ns/op | buntdb 257.9ns/op | minweight is fastest in this run. |
-| Mixed 90R/10W | 419.1ns/op | buntdb 907.5ns/op | minweight is fastest in this run. |
-| SeekGE | 246.0ns/op | buntdb 323.3ns/op | minweight is fastest in this run. |
-| Scan 100k | 11.6ms | bbolt 1.39ms | minweight scan is the clear weak spot. |
+| Workload | minweight | badger | bbolt | buntdb | goleveldb | pebble |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Overwrite | 765.9ns/op | 7.301us/op | 41.310us/op | 5.767us/op | 7.861us/op | 2.238us/op |
+| Get | 167.3ns/op | 1.225us/op | 698.1ns/op | 257.9ns/op | 1.173us/op | 6.564us/op |
+| Mixed 90R/10W | 419.1ns/op | 2.379us/op | 4.833us/op | 907.5ns/op | 2.516us/op | 8.860us/op |
+| SeekGE | 246.0ns/op | 47.397us/op | 753.6ns/op | 323.3ns/op | 4.017us/op | 7.447us/op |
+| Scan 100k | 11.6ms | 36.6ms | 1.39ms | 9.53ms | 23.6ms | 21.0ms |
+
+The table is sorted by workload, not by winner. Lower is better. Minweight leads
+overwrite, get, mixed, and seek in this run. Ordered full scan is the exception:
+bbolt is about 8.4x faster on the 100k-key scan.
 
 Full scan numbers:
 
@@ -155,13 +186,40 @@ Large-load run summary:
 - Peak sampled RSS: 14.76GB
 - Data limit exceeded: no
 
+### Large Get
+
+This table measures 1,000 point reads after loading the 6M-entry / 2KiB-value
+dataset shape. Lower `ns/op` is better. Wall time includes opening, loading, and
+closing the store for that benchmark invocation, so it is useful as a practical
+"can I get to the read workload quickly?" number, not only as the read-loop
+number.
+
+| Engine | Get latency | Read throughput | Wall time | Final data size |
+| --- | ---: | ---: | ---: | ---: |
+| minweight | 3.349us/op | 611.59 MB/s | 78.0s | 13.14GB |
+| goleveldb | 5.921us/op | 345.90 MB/s | 407.0s | 12.52GB |
+| pebble | 55.897us/op | 36.64 MB/s | 423.6s | 12.53GB |
+
+Large-get exclusions:
+
+| Engine | Status |
+| --- | --- |
+| badger | All-engine large-get run hit the 100GB data cap while running badger. |
+| bbolt | Deferred in this pass; its large-load cost was already 358.6s and 29.22GB. |
+| buntdb | Stopped after identifying its preload path as the long pole in a large-get attempt. |
+
+The current `kvbenchrun` now supports `-reuse-large-load-data`, so future large
+read/scan runs can reuse a kept `BenchmarkLargeLoad` data directory instead of
+paying the load cost repeatedly.
+
 ## Observations
 
 - `minweight_store` is strong on write-heavy and point-operation workloads in
   this benchmark. It leads default load, overwrite, get, mixed read/write, and
   seek.
 - `minweight_store` large-load throughput is substantially higher than the
-  other pure-Go engines tested here.
+  other pure-Go engines tested here, and the completed large-get point-read
+  result is also faster than the completed goleveldb and pebble results.
 - `Scan` is the main current weakness. On the 100k-key scan, bbolt is about
   8.4x faster than minweight. The minweight scan path still allocates heavily
   because public API safety clones returned key/value bytes.
@@ -178,9 +236,10 @@ Large-load run summary:
 - RSS is not an enforced memory limit on macOS. The reported peak RSS includes
   file-backed mmap and page-cache pages.
 - `iostat` is device-level for the whole machine, not per-process attribution.
-- Large `BenchmarkLargeGet` was started but stopped after identifying buntdb as
-  the slow path. The existing Go benchmark shape repeatedly rebuilds large
-  databases during calibration, making it too expensive for regular use.
+- Large `BenchmarkLargeGet` is now reported for minweight, goleveldb, and
+  pebble. badger and buntdb were excluded from the completed large-get table for
+  the concrete reasons listed above; bbolt large get was deferred to avoid
+  another long large-load cycle.
 - Directory sizes in multi-engine runs are benchmark-harness sizes. For exact
   per-engine final footprint, run one engine per `kvbenchrun` invocation with
   `-keep-data`.
@@ -189,9 +248,9 @@ Large-load run summary:
 
 ## Next Benchmark Harness Work
 
-- Add a prebuild/read mode for large `Get` and `Scan`: build each engine's
-  database once, then run read loops against that database. This avoids Go
-  benchmark calibration repeatedly rebuilding 10GB+ stores.
+- Use `-keep-data` plus `-reuse-large-load-data` for future large read/scan
+  passes so `BenchmarkLargeLoad` builds each database once and later workloads
+  open that data directly.
 - For external-memory tier, keep the main set to `minweight`, `pebble`,
   `goleveldb`, and `badger`; keep bbolt only when scan/space comparison matters;
   skip buntdb for large-tier runs.

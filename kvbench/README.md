@@ -80,6 +80,37 @@ go run ./cmd/kvbenchrun \
   -out results/large-minweight-load
 ```
 
+For large read benchmarks, first run `BenchmarkLargeLoad` with `-keep-data`,
+then point `BenchmarkLargeGet` or `BenchmarkLargeScan` at the kept `data/`
+directory. This avoids rebuilding the same large database for every read
+workload:
+
+```sh
+go run ./cmd/kvbenchrun \
+  -bench '^BenchmarkLargeLoad/(minweight|goleveldb|pebble)$' \
+  -benchtime=1x \
+  -count=1 \
+  -entries=6000000 \
+  -value-size=2048 \
+  -gomaxprocs=4 \
+  -max-rss=10GiB \
+  -max-data=100GB \
+  -keep-data \
+  -out results/large-6m-2k-load
+
+go run ./cmd/kvbenchrun \
+  -bench '^BenchmarkLargeGet/(minweight|goleveldb|pebble)$' \
+  -benchtime=1000x \
+  -count=1 \
+  -entries=6000000 \
+  -value-size=2048 \
+  -gomaxprocs=4 \
+  -max-rss=10GiB \
+  -max-data=100GB \
+  -reuse-large-load-data results/large-6m-2k-load/data \
+  -out results/large-6m-2k-get
+```
+
 The memory and data limits are soft runner limits: the runner samples the child
 process and data directory, kills the child if an enforceable limit is exceeded,
 and records the exceeded limit in `resource_summary.json`.
