@@ -55,6 +55,108 @@ func TestPutGetDelete(t *testing.T) {
 	}
 }
 
+func TestWriteBatch(t *testing.T) {
+	store := New()
+
+	var batch WriteBatch
+	alpha := []byte("alpha")
+	one := []byte("one")
+	if err := batch.Put(alpha, one); err != nil {
+		t.Fatal(err)
+	}
+	alpha[0] = 'x'
+	one[0] = 'z'
+	if err := batch.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Put([]byte("alpha"), []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Delete([]byte("bravo")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Delete([]byte("missing")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Put(nil, []byte("empty-key")); err != nil {
+		t.Fatal(err)
+	}
+	if batch.Len() != 6 {
+		t.Fatalf("batch len = %d, want 6", batch.Len())
+	}
+
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	assertGet(t, store, "alpha", "updated")
+	assertGet(t, store, "", "empty-key")
+	assertMissing(t, store, "bravo")
+	if n, err := store.Len(); err != nil || n != 2 {
+		t.Fatalf("Len = (%d,%v), want (2,nil)", n, err)
+	}
+
+	batch.Reset()
+	if batch.Len() != 0 {
+		t.Fatalf("batch len after reset = %d, want 0", batch.Len())
+	}
+}
+
+func TestWriteBatchReplaysWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var batch WriteBatch
+	if err := batch.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Delete([]byte("alpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	dirtySyncAndCloseStoreForTest(t, store)
+
+	store, err = Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+	assertMissing(t, store, "alpha")
+	assertGet(t, store, "bravo", "two")
+}
+
+func TestWriteBatchMissingDeleteIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	wal := store.records.activeSegment()
+	used := wal.used
+	var batch WriteBatch
+	if err := batch.Delete([]byte("missing")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if wal.used == used {
+		t.Fatalf("wal used = %d, want > %d", wal.used, used)
+	}
+	if n, err := store.Len(); err != nil || n != 0 {
+		t.Fatalf("Len = (%d,%v), want (0,nil)", n, err)
+	}
+}
+
 func TestVerifyIndexOnReadOption(t *testing.T) {
 	store, err := Open(t.TempDir(), Options{
 		WALSize:           1 << 20,

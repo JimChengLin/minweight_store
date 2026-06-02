@@ -44,6 +44,25 @@ func (s *heapRecordStore) Delete(key []byte) (minpatricia.Position, error) {
 	return 0, nil
 }
 
+func (s *heapRecordStore) AppendWriteBatch(ops []writeBatchOperation) ([]writeBatchRecord, error) {
+	records := make([]writeBatchRecord, 0, len(ops))
+	for _, op := range ops {
+		record := writeBatchRecord{
+			op:  op.op,
+			key: op.key,
+		}
+		if op.op == walOpPut {
+			pos, err := s.Append(op.key, op.value)
+			if err != nil {
+				return nil, err
+			}
+			record.pos = pos
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
 func (s *heapRecordStore) Free(pos minpatricia.Position) error {
 	if pos == 0 || uint64(pos) >= uint64(len(s.records)) || s.records[pos].key == nil {
 		return ErrCorruptIndex

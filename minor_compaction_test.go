@@ -27,6 +27,46 @@ func TestMinorCompactRetargetsCheckpointedWALToParquet(t *testing.T) {
 	assertIndexFileNoForKey(t, store, "bravo", onlyParquetFileNoForTest(t, store))
 }
 
+func TestMinorCompactRetargetsWriteBatchWALToParquet(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: crashTestWALSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopCompactionDispatchersForTest(store)
+	defer closeForTest(t, store)
+
+	var batch WriteBatch
+	if err := batch.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Put([]byte("bravo"), []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put([]byte("charlie"), []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.minorCompact(); err != nil {
+		t.Fatal(err)
+	}
+
+	parquetFileNo := onlyParquetFileNoForTest(t, store)
+	assertGet(t, store, "alpha", "one")
+	assertGet(t, store, "bravo", "two")
+	assertGet(t, store, "charlie", "three")
+	assertIndexFileNoForKey(t, store, "alpha", parquetFileNo)
+	assertIndexFileNoForKey(t, store, "bravo", parquetFileNo)
+}
+
 func TestManifestTracksLiveSSTDeletedEntries(t *testing.T) {
 	dir := t.TempDir()
 	store := openMinorCompactionStoreInDirForTest(t, dir)

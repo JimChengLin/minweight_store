@@ -29,6 +29,10 @@ const (
 	walOpDelete          = 2
 	walOpInstallSST      = 3
 	walOpInstallSSTBatch = 4
+	walOpWriteBatch      = 5
+
+	walBatchEntryPut    = 0x81
+	walBatchEntryDelete = 0x82
 
 	walInstallSSTPayloadSize     = 16
 	walInstallSSTBatchHeaderSize = 8
@@ -146,6 +150,38 @@ func (s *mmapWALRecordStore) AppendInstallSSTBatchRecord(oldSSTFileNos, newSSTFi
 	return s.appendRecord(walOpInstallSSTBatch, payload, nil)
 }
 
+func (s *mmapWALRecordStore) AppendWriteBatch(ops []writeBatchOperation) ([]writeBatchRecord, error) {
+	limit := min(s.size, recordOffsetLimit)
+	if s.used+walRecordHeaderSize > limit {
+		return nil, ErrWalFull
+	}
+
+	maxPayload := limit - s.used - walRecordHeaderSize
+	payload, relativeOffsets, err := encodeWriteBatchPayload(ops, maxPayload)
+	if err != nil {
+		return nil, err
+	}
+	batchPos, err := s.appendRecord(walOpWriteBatch, payload, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	batchPayloadOffset := recordPositionOffset(batchPos) + walRecordHeaderSize
+	records := make([]writeBatchRecord, len(ops))
+	for i, op := range ops {
+		pos, err := makeRecordPosition(s.fileNo, batchPayloadOffset+relativeOffsets[i])
+		if err != nil {
+			return nil, err
+		}
+		records[i] = writeBatchRecord{
+			op:  op.op,
+			key: op.key,
+			pos: pos,
+		}
+	}
+	return records, nil
+}
+
 func (s *mmapWALRecordStore) Free(pos minpatricia.Position) error {
 	return nil
 }
@@ -201,14 +237,11 @@ func (s *mmapWALRecordStore) replayStrict(fn func(op byte, key []byte, pos minpa
 		if err != nil {
 			return err
 		}
-		pos, err := makeRecordPosition(s.fileNo, offset)
+		next, err := s.replayDecodedRecord(offset, rec, fn)
 		if err != nil {
 			return err
 		}
-		if err := fn(rec.op, rec.key, pos); err != nil {
-			return err
-		}
-		offset = rec.end
+		offset = next
 	}
 	if offset != s.used {
 		return ErrCorruptWAL
@@ -224,17 +257,34 @@ func (s *mmapWALRecordStore) replayPointInTime(fn func(op byte, key []byte, pos 
 		if err != nil {
 			return s.truncate(lastGoodOffset)
 		}
-		pos, err := makeRecordPosition(s.fileNo, offset)
+		next, err := s.replayDecodedRecord(offset, rec, fn)
 		if err != nil {
 			return err
 		}
-		if err := fn(rec.op, rec.key, pos); err != nil {
-			return err
-		}
-		offset = rec.end
+		offset = next
 		lastGoodOffset = offset
 	}
 	return nil
+}
+
+func (s *mmapWALRecordStore) replayDecodedRecord(offset uint64, rec walRecord, fn func(op byte, key []byte, pos minpatricia.Position) error) (uint64, error) {
+	if rec.op != walOpWriteBatch {
+		pos, err := makeRecordPosition(s.fileNo, offset)
+		if err != nil {
+			return 0, err
+		}
+		return rec.end, fn(rec.op, rec.key, pos)
+	}
+
+	payloadOffset := offset + walRecordHeaderSize
+	err := forEachWriteBatchPayloadEntry(rec.key, func(op byte, key, value []byte, relativeOffset uint64) error {
+		pos, err := makeRecordPosition(s.fileNo, payloadOffset+relativeOffset)
+		if err != nil {
+			return err
+		}
+		return fn(op, key, pos)
+	})
+	return rec.end, err
 }
 
 func (s *mmapWALRecordStore) repairBestEffort() error {
@@ -336,14 +386,9 @@ func (s *mmapWALRecordStore) appendRecord(op byte, key, value []byte) (minpatric
 	}
 	keyLen := len(key)
 	valueLen := len(value)
-	if uint64(keyLen) > uint64(^uint32(0)) || uint64(valueLen) > uint64(^uint32(0)) {
-		return 0, ErrWalFull
-	}
-	total := uint64(walRecordHeaderSize + keyLen + valueLen)
-	if total > s.size-s.used {
-		return 0, ErrWalFull
-	}
-	if s.used+total > recordOffsetLimit {
+	total := uint64(walRecordHeaderSize) + uint64(keyLen) + uint64(valueLen)
+	limit := min(s.size, recordOffsetLimit)
+	if s.used+total > limit {
 		return 0, ErrWalFull
 	}
 
@@ -374,30 +419,53 @@ func (s *mmapWALRecordStore) recordAtOffset(offset uint64, verifyCRC bool) (walR
 	}
 	header := s.data[offset : offset+walRecordHeaderSize]
 	op := header[walRecordOpOffset]
-	if op != walOpPut && op != walOpDelete && op != walOpInstallSST && op != walOpInstallSSTBatch {
+	switch op {
+	case walOpPut, walOpDelete, walOpInstallSST, walOpInstallSSTBatch, walOpWriteBatch:
+	case walBatchEntryPut:
+		if verifyCRC {
+			return walRecord{}, ErrCorruptWAL
+		}
+		op = walOpPut
+	case walBatchEntryDelete:
+		if verifyCRC {
+			return walRecord{}, ErrCorruptWAL
+		}
+		op = walOpDelete
+	default:
 		return walRecord{}, ErrCorruptWAL
 	}
 	keyLen := uint64(binary.LittleEndian.Uint32(header[walRecordKeyOffset : walRecordKeyOffset+4]))
 	valueLen := uint64(binary.LittleEndian.Uint32(header[walRecordValueOffset : walRecordValueOffset+4]))
-	if (op == walOpPut || op == walOpDelete) && keyLen > minpatricia.MaxKeySize {
-		return walRecord{}, ErrCorruptWAL
-	}
-	if op == walOpDelete && valueLen != 0 {
-		return walRecord{}, ErrCorruptWAL
-	}
-	if op == walOpInstallSST && (keyLen != walInstallSSTPayloadSize || valueLen != 0) {
-		return walRecord{}, ErrCorruptWAL
-	}
-	if op == walOpInstallSSTBatch && valueLen != 0 {
-		return walRecord{}, ErrCorruptWAL
+	switch op {
+	case walOpPut:
+		if keyLen > minpatricia.MaxKeySize {
+			return walRecord{}, ErrCorruptWAL
+		}
+	case walOpDelete:
+		if keyLen > minpatricia.MaxKeySize || valueLen != 0 {
+			return walRecord{}, ErrCorruptWAL
+		}
+	case walOpInstallSST:
+		if keyLen != walInstallSSTPayloadSize || valueLen != 0 {
+			return walRecord{}, ErrCorruptWAL
+		}
+	case walOpInstallSSTBatch, walOpWriteBatch:
+		if valueLen != 0 {
+			return walRecord{}, ErrCorruptWAL
+		}
 	}
 	end := offset + walRecordHeaderSize + keyLen + valueLen
 	if end < offset || end > s.used {
 		return walRecord{}, ErrCorruptWAL
 	}
 	record := s.data[offset:end]
-	if op == walOpInstallSSTBatch {
+	switch op {
+	case walOpInstallSSTBatch:
 		if _, _, err := validateInstallSSTBatchPayload(record[walRecordHeaderSize:]); err != nil {
+			return walRecord{}, err
+		}
+	case walOpWriteBatch:
+		if err := forEachWriteBatchPayloadEntry(record[walRecordHeaderSize:], nil); err != nil {
 			return walRecord{}, err
 		}
 	}

@@ -151,6 +151,46 @@ func (s *Store) Delete(key []byte) (bool, error) {
 	}
 }
 
+func (s *Store) WriteBatch(batch WriteBatch) error {
+	if batch.Len() == 0 {
+		return nil
+	}
+
+	for {
+		s.primaryMu.Lock()
+		backend, err := s.openBackend()
+		if err != nil {
+			s.primaryMu.Unlock()
+			return err
+		}
+		result, err := backend.writeBatch(batch.ops)
+		walFullNotAccepted := errors.Is(err, ErrWalFull) && result == backendMutationNotAccepted
+		canFlush := false
+		if s.records != nil && s.manifest != nil {
+			active := s.records.activeSegment()
+			canFlush = active != nil && active.used != walHeaderSize
+		}
+		s.primaryMu.Unlock()
+
+		if walFullNotAccepted {
+			if !canFlush {
+				return err
+			}
+			logInfo(s.logger, "wal_full_flush",
+				"op", "write_batch",
+			)
+			if flushErr := s.flush(); flushErr != nil {
+				return s.mayMarkFatal(flushErr)
+			}
+			continue
+		}
+		if err != nil && result == backendMutationAcceptedThenFailed {
+			return s.mayMarkFatal(err)
+		}
+		return err
+	}
+}
+
 // SyncWAL syncs the active WAL segment and WAL directory metadata.
 // It does not checkpoint the primary index or advance MANIFEST.
 func (s *Store) SyncWAL() error {

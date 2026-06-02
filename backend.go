@@ -22,6 +22,7 @@ type indexRecordStore interface {
 	minpatricia.RecordStore
 	Append(key, value []byte) (minpatricia.Position, error)
 	Delete(key []byte) (minpatricia.Position, error)
+	AppendWriteBatch(ops []writeBatchOperation) ([]writeBatchRecord, error)
 	Free(pos minpatricia.Position) error
 	Value(pos minpatricia.Position) ([]byte, bool)
 	OwnedValue(pos minpatricia.Position) ([]byte, bool)
@@ -178,6 +179,49 @@ func (b *indexBackend) delete(key []byte) (bool, backendMutationResult, error) {
 		return true, backendMutationAcceptedThenFailed, err
 	}
 	return true, backendMutationApplied, nil
+}
+
+func (b *indexBackend) writeBatch(ops []writeBatchOperation) (backendMutationResult, error) {
+	records, err := b.records.AppendWriteBatch(ops)
+	if err != nil {
+		return backendMutationNotAccepted, err
+	}
+	if err := b.applyWriteBatchRecords(records); err != nil {
+		return backendMutationAcceptedThenFailed, err
+	}
+	return backendMutationApplied, nil
+}
+
+func (b *indexBackend) applyWriteBatchRecords(records []writeBatchRecord) error {
+	for _, record := range records {
+		switch record.op {
+		case walOpPut:
+			old, replaced, err := b.index.Put(record.key, record.pos)
+			if err != nil {
+				_ = b.records.Free(record.pos)
+				return err
+			}
+			if replaced {
+				if err := b.records.Free(old); err != nil {
+					return err
+				}
+			}
+		case walOpDelete:
+			old, deleted, err := b.index.Delete(record.key)
+			if err != nil {
+				return err
+			}
+			if !deleted {
+				continue
+			}
+			if err := b.records.Free(old); err != nil {
+				return err
+			}
+		default:
+			return ErrCorruptWAL
+		}
+	}
+	return nil
 }
 
 func (b *indexBackend) scan(fn VisitFunc) error {

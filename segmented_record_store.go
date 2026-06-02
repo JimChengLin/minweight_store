@@ -173,6 +173,14 @@ func (s *segmentedRecordStore) AppendInstallSSTBatchRecord(oldSSTFileNos, newSST
 	return active.AppendInstallSSTBatchRecord(oldSSTFileNos, newSSTFileNos)
 }
 
+func (s *segmentedRecordStore) AppendWriteBatch(ops []writeBatchOperation) ([]writeBatchRecord, error) {
+	active := s.activeSegment()
+	if active == nil {
+		return nil, ErrClosed
+	}
+	return active.AppendWriteBatch(ops)
+}
+
 func (s *segmentedRecordStore) Free(pos minpatricia.Position) error {
 	fileNo := recordPositionFileNo(pos)
 	rowIndex := recordPositionOffset(pos)

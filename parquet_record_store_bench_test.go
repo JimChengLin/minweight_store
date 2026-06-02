@@ -199,6 +199,10 @@ func (s parquetIndexRecordStore) Delete(key []byte) (minpatricia.Position, error
 	return 0, ErrClosed
 }
 
+func (s parquetIndexRecordStore) AppendWriteBatch(ops []writeBatchOperation) ([]writeBatchRecord, error) {
+	return nil, ErrClosed
+}
+
 func (s parquetIndexRecordStore) Free(pos minpatricia.Position) error {
 	return nil
 }

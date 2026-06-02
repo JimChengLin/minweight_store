@@ -105,6 +105,11 @@ value, ok, err := store.Get([]byte("alpha"))
 deleted, err := store.Delete([]byte("alpha"))
 length, err := store.Len()
 
+var batch minweight_store.WriteBatch
+_ = batch.Put([]byte("bravo"), []byte("two"))
+_ = batch.Delete([]byte("alpha"))
+err = store.WriteBatch(batch)
+
 item, ok, err := store.SeekGE([]byte("a"))
 item, ok, err = store.SeekLE([]byte("z"))
 
@@ -126,6 +131,8 @@ Range semantics:
 - `SeekLE` returns the last item whose key is `<= pivot`.
 - `Delete` on a missing key returns `(false, nil)`. In WAL-backed stores it does
   not write a delete record for that miss.
+- `WriteBatch` applies its operations in order and writes one batch WAL record
+  for all operations. Delete misses inside a batch replay as no-ops.
 
 ## Detailed Design
 
@@ -146,6 +153,9 @@ positions are 63-bit record handles: high 33 bits are record file number, low
 30 bits are offset or row inside that file. The file suffix determines the
 record-store kind; current Store positions point to WAL segments under
 `wal/*.wal` or compacted Parquet segments under `sst/*.parquet`.
+`WriteBatch` uses a single WAL record (`op=5`) whose payload contains embedded
+put/delete entries; index positions point at those embedded entries, so replay
+keeps the batch CRC boundary while reads still resolve individual values.
 
 `Flush` seals the active WAL, creates a new active WAL, syncs the new active WAL
 header and WAL directory state, syncs the live primary index and sealed WAL,
