@@ -149,6 +149,24 @@ func (s *Store) Delete(key []byte) (bool, error) {
 	}
 }
 
+// SyncWAL syncs the active WAL segment and WAL directory metadata.
+// It does not checkpoint the primary index or advance MANIFEST.
+func (s *Store) SyncWAL() error {
+	s.secondaryIndexMu.Lock()
+	defer s.secondaryIndexMu.Unlock()
+
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
+
+	if _, err := s.openBackend(); err != nil {
+		return err
+	}
+	if s.records == nil {
+		return nil
+	}
+	return s.records.Sync()
+}
+
 func (s *Store) Scan(fn VisitFunc) error {
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()

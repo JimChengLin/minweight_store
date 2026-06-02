@@ -174,6 +174,51 @@ func TestDeleteMissingDoesNotFlushFullWAL(t *testing.T) {
 	}
 }
 
+func TestSyncWALMemoryStoreNoop(t *testing.T) {
+	store := New()
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SyncWAL(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSyncWALSyncsActiveWAL(t *testing.T) {
+	store, err := Open(t.TempDir(), Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, store)
+
+	if err := store.Put([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	active := store.records.activeSegment()
+	if !active.dataDirty {
+		t.Fatal("active WAL dataDirty = false, want true before SyncWAL")
+	}
+	if !active.metadataDirty {
+		t.Fatal("active WAL metadataDirty = false, want true before SyncWAL")
+	}
+	if !store.records.walDirDirty {
+		t.Fatal("walDirDirty = false, want true before SyncWAL")
+	}
+
+	if err := store.SyncWAL(); err != nil {
+		t.Fatal(err)
+	}
+	if active.dataDirty {
+		t.Fatal("active WAL dataDirty = true, want false after SyncWAL")
+	}
+	if active.metadataDirty {
+		t.Fatal("active WAL metadataDirty = true, want false after SyncWAL")
+	}
+	if store.records.walDirDirty {
+		t.Fatal("walDirDirty = true, want false after SyncWAL")
+	}
+}
+
 func TestStoreFatalAfterRecordAcceptedIndexFailure(t *testing.T) {
 	keyTooLarge := make([]byte, minpatricia.MaxKeySize+1)
 	records := &badKeyRecordStore{
