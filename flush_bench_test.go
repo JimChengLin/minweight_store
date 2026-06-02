@@ -601,6 +601,7 @@ func dirtyCloseFlushBenchStore(tb testing.TB, store *Store) {
 
 	stopCompactionDispatchersForTest(store)
 	backend := store.backend
+	closeStoreFileLockForTest(tb, store)
 	store.backend = nil
 	store.manifest = nil
 	store.records = nil

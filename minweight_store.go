@@ -19,6 +19,7 @@ var (
 	ErrManifest     = errors.New("minweight_store: corrupt manifest")
 	ErrParquet      = errors.New("minweight_store: invalid parquet record store")
 	ErrOptions      = errors.New("minweight_store: invalid options")
+	ErrLocked       = errors.New("minweight_store: store is locked")
 )
 
 type Store struct {
@@ -35,6 +36,7 @@ type Store struct {
 	targetSSTSize            int64
 	logger                   *slog.Logger
 	loggerWriter             *rotatingLogWriter
+	fileLock                 *storeFileLock
 	minorCompaction          *compactionDispatcher
 	majorCompaction          *compactionDispatcher
 	fatal                    error
@@ -263,10 +265,12 @@ func (s *Store) Close() error {
 	backend := s.backend
 	manifest := s.manifest
 	loggerWriter := s.loggerWriter
+	fileLock := s.fileLock
 	s.backend = nil
 	s.manifest = nil
 	s.records = nil
 	s.loggerWriter = nil
+	s.fileLock = nil
 	s.primaryMu.Unlock()
 
 	var closeErr error
@@ -285,6 +289,11 @@ func (s *Store) Close() error {
 	}
 	if loggerWriter != nil {
 		if err := loggerWriter.Close(); err != nil {
+			firstErr = errors.Join(firstErr, err)
+		}
+	}
+	if fileLock != nil {
+		if err := fileLock.Close(); err != nil {
 			firstErr = errors.Join(firstErr, err)
 		}
 	}

@@ -85,6 +85,28 @@ func TestOpenCreatesRecordSegmentDirectories(t *testing.T) {
 	}
 }
 
+func TestOpenLocksStoreDirectory(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir, Options{WALSize: 1 << 20})
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("Open locked dir err = %v, want %v", err, ErrLocked)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir, Options{WALSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeForTest(t, reopened)
+}
+
 func TestOpenResetsPersistedIndexBeforeReplay(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir, Options{WALSize: 1 << 20})
@@ -200,13 +222,7 @@ func TestOpenDirtyStoreReplaysWAL(t *testing.T) {
 	if err := store.Put([]byte("bravo"), []byte("two")); err != nil {
 		t.Fatal(err)
 	}
-	stopCompactionDispatchersForTest(store)
-	backend := store.backend
-	store.records = nil
-	store.backend = nil
-	if err := backend.syncAndClose(); err != nil {
-		t.Fatal(err)
-	}
+	dirtySyncAndCloseStoreForTest(t, store)
 
 	store, err = Open(dir, Options{WALSize: 1 << 20})
 	if err != nil {
@@ -791,13 +807,7 @@ func TestOpenBestEffortRepairsCorruptWALRecord(t *testing.T) {
 	if err := store.Put([]byte("delta"), []byte("four")); err != nil {
 		t.Fatal(err)
 	}
-	stopCompactionDispatchersForTest(store)
-	backend := store.backend
-	store.records = nil
-	store.backend = nil
-	if err := backend.syncAndClose(); err != nil {
-		t.Fatal(err)
-	}
+	dirtySyncAndCloseStoreForTest(t, store)
 
 	store, err = Open(dir, Options{WALSize: walSize})
 	if err != nil {
@@ -902,6 +912,7 @@ func dirtySyncAndCloseStoreForTest(t *testing.T, store *Store) {
 	stopCompactionDispatchersForTest(store)
 	backend := store.backend
 	manifest := store.manifest
+	closeStoreFileLockForTest(t, store)
 	store.records = nil
 	store.manifest = nil
 	store.backend = nil

@@ -76,6 +76,16 @@ func Open(dir string, options ...Options) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
+	fileLock, err := lockStoreDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	fileLockOwnedByStore := false
+	defer func() {
+		if !fileLockOwnedByStore {
+			_ = fileLock.Close()
+		}
+	}()
 	logger, loggerWriter, err := openStoreLogger(dir, cfg.Logger)
 	if err != nil {
 		return nil, err
@@ -152,10 +162,12 @@ func Open(dir string, options ...Options) (*Store, error) {
 		targetSSTSize:            cfg.TargetSSTSize,
 		logger:                   cfg.Logger,
 		loggerWriter:             loggerWriter,
+		fileLock:                 fileLock,
 	}
 	opened.records.onCompactableFileAdded = store.notifyMajorCompaction
 	manifestOwnedByStore = true
 	loggerWriterOwnedByStore = true
+	fileLockOwnedByStore = true
 	logInfo(cfg.Logger, "open_done",
 		"checkpoint_wal_file_no", store.checkpointWALFileNo,
 		"wal_size", store.records.size,

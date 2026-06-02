@@ -19,6 +19,18 @@ func stopCompactionDispatchersForTest(store *Store) {
 	store.stopMajorCompactionDispatcher()
 }
 
+func closeStoreFileLockForTest(tb testing.TB, store *Store) {
+	tb.Helper()
+
+	fileLock := store.fileLock
+	store.fileLock = nil
+	if fileLock != nil {
+		if err := fileLock.Close(); err != nil {
+			tb.Fatal(err)
+		}
+	}
+}
+
 func (b *indexBackend) syncAndClose() error {
 	firstErr := b.sync()
 	var err error
