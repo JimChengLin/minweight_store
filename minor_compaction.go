@@ -75,6 +75,9 @@ func (s *Store) minorCompact() error {
 		"candidate_wal_count", len(candidates),
 		"duration", time.Since(start),
 	)
+	if firstErr == nil {
+		s.notifyMajorCompaction()
+	}
 	return firstErr
 }
 

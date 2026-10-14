@@ -435,6 +435,46 @@ func (s *segmentedRecordStore) compactableParquetFileNos() []uint64 {
 	return ids
 }
 
+type parquetSSTCandidate struct {
+	fileNo uint64
+	bytes  int64
+}
+
+func (s *segmentedRecordStore) liveParquetSSTsBelow(maxBytes int64) ([]parquetSSTCandidate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	candidates := make([]parquetSSTCandidate, 0, len(s.liveSSTs))
+	for fileNo := range s.liveSSTs {
+		if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
+			continue
+		}
+		sst, ok := s.segments[fileNo].(*parquetRecordStore)
+		if !ok {
+			return nil, ErrManifest
+		}
+		if sst.physicalSize < maxBytes {
+			candidates = append(candidates, parquetSSTCandidate{fileNo: fileNo, bytes: sst.physicalSize})
+		}
+	}
+	return candidates, nil
+}
+
+func (s *segmentedRecordStore) parquetPhysicalSizes(fileNos []uint64) ([]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sizes := make([]int64, len(fileNos))
+	for i, fileNo := range fileNos {
+		sst, ok := s.segments[fileNo].(*parquetRecordStore)
+		if !ok {
+			return nil, ErrManifest
+		}
+		sizes[i] = sst.physicalSize
+	}
+	return sizes, nil
+}
+
 func (s *segmentedRecordStore) rebuildCompactableSSTs() {
 	s.compactableSSTFileNos = s.compactableSSTFileNos[:0]
 	for fileNo, stats := range s.liveSSTs {

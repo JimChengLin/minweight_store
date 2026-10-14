@@ -244,6 +244,19 @@ needs at least three
 eligible SSTs in the normal path; if the final tail has fewer than three
 eligible SSTs, it still runs when the overall live-SST garbage ratio reaches the
 same threshold.
+
+Major compaction also consolidates small SSTs independently of their source or
+garbage ratio. Every live, non-pending-delete SST whose physical Parquet size is
+strictly less than `TargetSSTSize / 4` is a small-SST candidate. Once at least
+four candidates exist, the picker orders them by physical size and then file
+number, and keeps adding candidates until their physical sizes reach or cross
+`TargetSSTSize`, or until none remain. The picker reads the current live SST set
+directly; it does not maintain separate small-SST state. Small-SST selection
+takes precedence over garbage-ratio selection, but uses the normal
+major-compaction writer and may produce multiple SSTs near `TargetSSTSize`.
+After a successful minor-compaction batch, the store wakes the major dispatcher
+once so newly materialized clean SSTs are considered by this picker.
+
 Each round uses at most `MajorCompactionThreadNum * 3` input SSTs and at most one
 worker per three input SSTs, merge-sorts their keys, keeps only entries whose
 current primary index position still points at the old SST position, writes

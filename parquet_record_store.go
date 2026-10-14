@@ -33,6 +33,7 @@ type parquetRecordKey struct {
 type parquetRecordStore struct {
 	path         string
 	fileNo       uint64
+	physicalSize int64
 	file         *os.File
 	rowGroups    []parquet.RowGroup
 	rowStarts    []uint64
@@ -224,6 +225,7 @@ func openParquetRecordStore(path string, fileNo uint64) (*parquetRecordStore, er
 	return &parquetRecordStore{
 		path:         path,
 		fileNo:       fileNo,
+		physicalSize: info.Size(),
 		file:         file,
 		rowGroups:    rowGroups,
 		rowStarts:    parquetRecordRowStarts(rowGroups),

@@ -4,7 +4,6 @@ package minweight_store
 
 import (
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -267,7 +266,7 @@ func TestMajorCompactFinalCheckCompactsTwoSSTsWhenOverallGarbageHigh(t *testing.
 
 func TestMajorCompactSkipsSmallTailWhenOverallGarbageLow(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(dir, Options{WALSize: crashTestWALSize})
+	store, err := Open(dir, Options{WALSize: crashTestWALSize, TargetSSTSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,18 +329,12 @@ func TestMajorCompactSkipsSmallTailWhenOverallGarbageLow(t *testing.T) {
 }
 
 func TestMajorCompactionGroupsUseOneWorkerPerThreeSSTs(t *testing.T) {
-	dir := t.TempDir()
-	if err := createRecordSegmentDirs(dir); err != nil {
-		t.Fatal(err)
-	}
 	store := &Store{
-		records:                  &segmentedRecordStore{rootDir: dir},
+		records:                  &segmentedRecordStore{segments: map[uint64]recordSegment{}},
 		majorCompactionThreadNum: 8,
 	}
 	for fileNo := uint64(1); fileNo <= 6; fileNo++ {
-		if err := os.WriteFile(parquetSegmentPath(dir, fileNo), []byte{byte(fileNo)}, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		store.records.segments[fileNo] = &parquetRecordStore{fileNo: fileNo, physicalSize: 1}
 	}
 
 	groups, err := store.majorCompactionSSTGroups([]uint64{1, 2, 3, 4, 5})

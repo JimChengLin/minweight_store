@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,7 +32,10 @@ type majorCompactionBuildResult struct {
 	entries []majorCompactionEntry
 }
 
-const majorCompactionMaxSSTsPerWorker = 3
+const (
+	majorCompactionMaxSSTsPerWorker  = 3
+	majorCompactionSmallSSTsPerGroup = 4
+)
 
 func (s *Store) MajorCompact() error {
 	for {
@@ -108,6 +112,20 @@ func (s *Store) majorCompactionSSTFileNos() ([]uint64, bool, error) {
 	if s.records == nil || s.manifest == nil {
 		return nil, false, ErrManifest
 	}
+	small, err := s.records.liveParquetSSTsBelow(s.targetSSTSize / majorCompactionSmallSSTsPerGroup)
+	if err != nil {
+		return nil, false, err
+	}
+	if fileNos := pickSmallestSSTs(small, s.targetSSTSize); len(fileNos) != 0 {
+		garbage, garbageMore := s.garbageCompactionSSTFileNos()
+		return fileNos, len(small)-len(fileNos) >= majorCompactionSmallSSTsPerGroup || len(garbage) != 0 || garbageMore, nil
+	}
+
+	fileNos, hasMore := s.garbageCompactionSSTFileNos()
+	return fileNos, hasMore, nil
+}
+
+func (s *Store) garbageCompactionSSTFileNos() ([]uint64, bool) {
 	fileNos := s.records.compactableParquetFileNos()
 	hasMore := false
 	limit := s.majorCompactionThreadNum * majorCompactionMaxSSTsPerWorker
@@ -116,9 +134,32 @@ func (s *Store) majorCompactionSSTFileNos() ([]uint64, bool, error) {
 		hasMore = true
 	}
 	if !hasMore && len(fileNos) < majorCompactionMaxSSTsPerWorker && !s.records.liveSSTGarbageRatioReached() {
-		return nil, false, nil
+		fileNos = nil
 	}
-	return fileNos, hasMore, nil
+	return fileNos, hasMore
+}
+
+func pickSmallestSSTs(candidates []parquetSSTCandidate, targetBytes int64) []uint64 {
+	if len(candidates) < majorCompactionSmallSSTsPerGroup {
+		return nil
+	}
+	candidates = append([]parquetSSTCandidate(nil), candidates...)
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].bytes != candidates[j].bytes {
+			return candidates[i].bytes < candidates[j].bytes
+		}
+		return candidates[i].fileNo < candidates[j].fileNo
+	})
+	selected := make([]uint64, 0, len(candidates))
+	var bytes int64
+	for _, candidate := range candidates {
+		selected = append(selected, candidate.fileNo)
+		bytes += candidate.bytes
+		if len(selected) >= majorCompactionSmallSSTsPerGroup && bytes >= targetBytes {
+			return selected
+		}
+	}
+	return selected
 }
 
 type majorCompactionKeyStream struct {
@@ -315,14 +356,12 @@ func (s *Store) buildMajorCompactionSSTGroup(oldSSTFileNos []uint64) ([]*parquet
 }
 
 func (s *Store) majorCompactionSSTGroups(fileNos []uint64) ([]majorCompactionSSTGroup, error) {
-	sizes := make([]int64, len(fileNos))
+	sizes, err := s.records.parquetPhysicalSizes(fileNos)
+	if err != nil {
+		return nil, err
+	}
 	var totalBytes int64
-	for i, fileNo := range fileNos {
-		info, err := os.Stat(parquetSegmentPath(s.records.rootDir, fileNo))
-		if err != nil {
-			return nil, err
-		}
-		sizes[i] = info.Size()
+	for i := range fileNos {
 		totalBytes += sizes[i]
 	}
 
