@@ -491,6 +491,11 @@ func (s *segmentedRecordStore) rebuildCompactableSSTs() {
 }
 
 func (s *segmentedRecordStore) addCompactableSSTWithStoreLocked(fileNo uint64, stats liveSSTStats) bool {
+	// Checkpoint replay may revisit an intermediate install after the live
+	// primary state has retired it. It must not become a candidate again.
+	if _, pendingDelete := s.pendingDeleteSSTs[fileNo]; pendingDelete {
+		return false
+	}
 	if !s.sstGarbageRatioReached(stats) {
 		return false
 	}
